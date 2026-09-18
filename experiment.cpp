@@ -145,6 +145,7 @@ struct State
     Real a1 = 0, a2 = 0;
     bool terminal = false;
 };
+
 struct Tangent
 {
     Real theta = 0, capacity = 0, M = 0, D = 0;
