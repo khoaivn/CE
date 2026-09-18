@@ -20,6 +20,16 @@ c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
   > facebook_results.csv
 ```
 
+Hoặc dùng `Makefile`:
+
+```bash
+make
+make run
+make run-one BUDGET=16 ALPHA=0.3
+```
+
+`make run` chạy lần lượt các ngân sách 16, 20, 24 và 28, rồi ghi CSV vào thư mục `results/`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
+
 Ngân sách `--budget` là giá trị tuyệt đối và không tự thay đổi khi quét `alpha`. Có thể dùng `--budget-ratio r` để đặt `B = r * sum(mu)`; cách này cũng độc lập với `alpha`. Không truyền đồng thời hai tùy chọn ngân sách.
 
 Các seed mặc định được tách riêng: tài nguyên 42, RR tối ưu 43, RR đánh giá 44 và thứ tự luồng 45. Có thể thay bằng `--resource-seed`, `--rr-seed`, `--eval-seed` và `--order-seed`. Giữ nguyên resource seed khi so sánh các giá trị `B`, `alpha` hoặc `epsilon`.
