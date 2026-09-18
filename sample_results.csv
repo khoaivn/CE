@@ -1,0 +1,4 @@
+algorithm,n,seed,epsilon,alpha,budget_ratio,uncertainty,order,B,value,opt_ratio,chance_score,score_over_B,feasible,size,queries,ms,tangents,peak_states,peak_candidate_slots
+OPT,16,42,0.02,0.05,0.2,0.5,random,22.7022195231,101,1,18.244580056,0.803647415943,1,5,356,5.379833,0,0,0
+Offline_Greedy_CC,16,42,0.02,0.05,0.2,0.5,random,22.7022195231,101,1,18.244580056,0.803647415943,1,5,85,0.005666,0,0,0
+FOCUS_EXACT_USM,16,42,0.02,0.05,0.2,0.5,random,22.7022195231,82,0.811881188119,12.4723561935,0.549389286838,1,4,2927,0.120125,18,221,315
