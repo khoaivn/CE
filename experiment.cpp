@@ -29,6 +29,7 @@ struct Config {
     Real edgeProbability = 0.01L, epsilon = 0.02L, alpha = 0.05L;
     Real budget = 100.0L, budgetRatio = -1.0L, uncertainty = 0.5L;
     uint64_t resourceSeed = 42, rrSeed = 43, evalSeed = 44, orderSeed = 45;
+    bool printSeeds = false;
 };
 
 Real gaussianQuantile(Real alpha) {
@@ -131,9 +132,11 @@ struct Resources {
 Resources makeResources(int n, Real uncertainty, uint64_t seed) {
     Resources r; r.mu.resize(static_cast<size_t>(n)); r.variance.resize(static_cast<size_t>(n));
     std::mt19937_64 rng(seed);
-    std::uniform_real_distribution<double> mean(1.0, 10.0);
+    std::uniform_real_distribution<double> mean(0.0, 1.0);
     for (int e = 0; e < n; ++e) {
-        Real mu = mean(rng), sigma = uncertainty * mu;
+        Real mu = 0;
+        while (mu == 0) mu = mean(rng); // Keep sigma^2 strictly positive.
+        Real sigma = uncertainty * mu;
         if (!std::isfinite(mu) || !std::isfinite(sigma) || sigma <= 0 ||
             !std::isfinite(sigma*sigma) || sigma*sigma <= 0)
             throw std::runtime_error("Resource scale produced a zero or non-finite variance");
@@ -210,7 +213,31 @@ struct RunResult {
     uint64_t queries = 0;
     double milliseconds = 0;
     size_t tangents = 0, peakStates = 0, peakSlots = 0;
+    size_t algorithmMemoryBytes = 0;
 };
+
+size_t candidateDynamicBytes(const Candidate& candidate) {
+    return candidate.items.capacity()*sizeof(int) +
+           candidate.covered.capacity()*sizeof(uint64_t);
+}
+
+size_t graphStorageBytes(const Graph& graph) {
+    size_t bytes = sizeof(Graph) + graph.reverse.capacity()*sizeof(std::vector<int>);
+    for (const auto& adjacency : graph.reverse) bytes += adjacency.capacity()*sizeof(int);
+    return bytes;
+}
+
+size_t rrStorageBytes(const RRBank& bank) {
+    size_t bytes = sizeof(RRBank) +
+                   bank.incidence.capacity()*sizeof(std::vector<uint32_t>);
+    for (const auto& list : bank.incidence) bytes += list.capacity()*sizeof(uint32_t);
+    return bytes;
+}
+
+size_t resourcesStorageBytes(const Resources& resources) {
+    return sizeof(Resources) + resources.mu.capacity()*sizeof(Real) +
+           resources.variance.capacity()*sizeof(Real);
+}
 
 void consider(RROracle& oracle, const Candidate& set, Candidate& best) {
     (void)oracle.spread(set.hits);
@@ -252,6 +279,9 @@ RunResult offlineGreedy(const Graph& g, const RRBank& train, const RRBank& evalu
     result.evalHits = evaluate(evaluation, result.items);
     result.mu = best.mu; result.variance = best.variance; result.queries = oracle.queries;
     result.milliseconds = std::chrono::duration<double,std::milli>(finished-started).count();
+    result.algorithmMemoryBytes = sizeof(best)+sizeof(current) +
+        candidateDynamicBytes(best)+candidateDynamicBytes(current) +
+        selected.capacity()*sizeof(char) + evaluation.words*sizeof(uint64_t);
     return result;
 }
 
@@ -265,6 +295,30 @@ struct Tangent {
     std::map<int,State> active;
     std::set<int> retired;
 };
+
+size_t tangentStorageBytes(const Tangent& tangent) {
+    size_t bytes = sizeof(std::pair<const int,Tangent>)+3*sizeof(void*) +
+        tangent.retired.size()*(sizeof(int)+3*sizeof(void*));
+    for (const auto& [k,state] : tangent.active) {
+        (void)k;
+        bytes += sizeof(std::pair<const int,State>)+3*sizeof(void*) +
+            candidateDynamicBytes(state.first)+candidateDynamicBytes(state.second);
+    }
+    return bytes;
+}
+
+size_t focusStorageBytes(const Candidate& best, const std::map<int,Tangent>& tangents) {
+    size_t bytes = sizeof(tangents)+sizeof(best)+candidateDynamicBytes(best);
+    for (const auto& [j,tangent] : tangents) {
+        (void)j; bytes += tangentStorageBytes(tangent);
+    }
+    return bytes;
+}
+
+void replaceStorageBytes(size_t& total, size_t oldBytes, size_t newBytes) {
+    if (newBytes >= oldBytes) total += newBytes-oldBytes;
+    else total -= oldBytes-newBytes;
+}
 
 std::pair<int,int> checkedIndexRange(Real first, Real last, const char* message) {
     if (!std::isfinite(first) || !std::isfinite(last) || last < first ||
@@ -283,7 +337,8 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
     const Real tangentBase = std::log(1.5L), top = budget / z;
     std::map<int,Tangent> tangents;
     Candidate best(train.words);
-    size_t peakStates = 0, peakSlots = 0;
+    size_t peakStates = 0, peakSlots = 0, peakAlgorithmBytes = 0;
+    size_t currentAlgorithmBytes = focusStorageBytes(best,tangents);
     for (int e : order) {
         uint32_t singletonHits = oracle.singletonHits(e);
         Real singletonValue = oracle.toSpread(singletonHits);
@@ -292,6 +347,8 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
         if (singletonHits > best.hits) {
             best = Candidate(train.words); addItem(best, e, singletonHits, train, resources);
         }
+        currentAlgorithmBytes = focusStorageBytes(best,tangents);
+        peakAlgorithmBytes = std::max(peakAlgorithmBytes,currentAlgorithmBytes);
         Real A = budget - mu;
         Real discriminant = std::max(Real(0), A*A-z*z*var);
         Real root = std::sqrt(discriminant);
@@ -307,6 +364,8 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
             Real capacity = budget - z*theta/2;
             Real normalized = (mu + z*var/(2*theta))/capacity;
             if (!std::isfinite(normalized) || normalized > 1) continue;
+            auto existing = tangents.find(j);
+            size_t oldTangentBytes = existing == tangents.end() ? 0 : tangentStorageBytes(existing->second);
             auto [where,inserted] = tangents.try_emplace(j);
             Tangent& tangent = where->second;
             if (inserted) { tangent.theta = theta; tangent.capacity = capacity; }
@@ -330,6 +389,10 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
             for (auto it = tangent.retired.begin(); it != tangent.retired.end();) {
                 if (std::exp(*it*logValueBase) < lower) it = tangent.retired.erase(it); else ++it;
             }
+            // Capture states that may be created and retired by the same item.
+            size_t beforeProcessingBytes = tangentStorageBytes(tangent);
+            replaceStorageBytes(currentAlgorithmBytes,oldTangentBytes,beforeProcessingBytes);
+            peakAlgorithmBytes = std::max(peakAlgorithmBytes,currentAlgorithmBytes);
             for (auto it = tangent.active.begin(); it != tangent.active.end();) {
                 int k = it->first; State& state = it->second;
                 Real threshold = std::exp(k*logValueBase)/4;
@@ -357,13 +420,17 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
                 }
                 ++it;
             }
+            size_t afterProcessingBytes = tangentStorageBytes(tangent);
+            replaceStorageBytes(currentAlgorithmBytes,beforeProcessingBytes,afterProcessingBytes);
+            peakAlgorithmBytes = std::max(peakAlgorithmBytes,currentAlgorithmBytes);
         }
         size_t states = 0, slots = 0;
-        for (const auto& [j,tangent] : tangents)
+        for (const auto& [j,tangent] : tangents) {
             for (const auto& [k,state] : tangent.active) {
                 (void)j; (void)k; ++states;
                 slots += state.first.items.size()+state.second.items.size();
             }
+        }
         peakStates = std::max(peakStates, states); peakSlots = std::max(peakSlots, slots);
     }
     // RR coverage is monotone, so S1 itself is an optimal unconstrained subset of S1.
@@ -371,6 +438,7 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
         for (const auto& [k,state] : tangent.active) {
             (void)j; (void)k; consider(oracle, state.first, best); consider(oracle, state.second, best);
         }
+    peakAlgorithmBytes = std::max(peakAlgorithmBytes,focusStorageBytes(best,tangents));
     auto finished = Clock::now();
     RunResult result;
     result.items = best.items; result.trainHits = best.hits;
@@ -378,6 +446,8 @@ RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
     result.mu = best.mu; result.variance = best.variance; result.queries = oracle.queries;
     result.milliseconds = std::chrono::duration<double,std::milli>(finished-started).count();
     result.tangents = tangents.size(); result.peakStates = peakStates; result.peakSlots = peakSlots;
+    result.algorithmMemoryBytes = std::max(peakAlgorithmBytes,
+        sizeof(best)+candidateDynamicBytes(best)) + evaluation.words*sizeof(uint64_t);
     return result;
 }
 
@@ -404,11 +474,12 @@ Config parseArguments(int argc, char** argv) {
         else if (a == "--rr-seed") c.rrSeed = std::stoull(take(i));
         else if (a == "--eval-seed") c.evalSeed = std::stoull(take(i));
         else if (a == "--order-seed") c.orderSeed = std::stoull(take(i));
+        else if (a == "--print-seeds") c.printSeeds = true;
         else if (a == "--help") {
             std::cout << "Usage: facebook_experiment [--graph facebook] [--budget 100] [--alpha .05]\n"
                       << "  [--epsilon .02] [--uncertainty .5] [--p .01]\n"
                       << "  [--rr-samples 50000] [--eval-samples 100000]\n"
-                      << "  [--order random|mu_asc|mu_desc] [--resource-seed N]\n";
+                      << "  [--order random|mu_asc|mu_desc] [--resource-seed N] [--print-seeds]\n";
             std::exit(0);
         } else throw std::runtime_error("Unknown option: " + a);
     }
@@ -429,7 +500,8 @@ Config parseArguments(int argc, char** argv) {
 
 void printResult(const std::string& name, const RunResult& r, const Config& c,
                  const Graph& g, const RRBank& train, const RRBank& evaluation,
-                 Real z, Real budget, double rrMilliseconds) {
+                 Real z, Real budget, Real sumMu, double rrMilliseconds,
+                 size_t sharedMemoryBytes) {
     Real trainSpread = Real(g.n)*r.trainHits/train.samples;
     Real evalSpread = Real(g.n)*r.evalHits/evaluation.samples;
     Real evalRate = Real(r.evalHits)/evaluation.samples;
@@ -437,18 +509,26 @@ void printResult(const std::string& name, const RunResult& r, const Config& c,
     Real evalLow = std::max(Real(0), evalSpread-Real(1.96)*evalStandardError);
     Real evalHigh = std::min(Real(g.n), evalSpread+Real(1.96)*evalStandardError);
     Real score = chanceScore(r.mu, r.variance, z);
-    std::cout << name << ',' << g.n << ',' << g.arcs << ',' << c.rrSamples << ',' << c.evalSamples << ','
-              << c.edgeProbability << ',' << c.epsilon << ',' << c.alpha << ',' << budget << ','
-              << c.uncertainty << ',' << c.order << ',' << c.resourceSeed << ',' << c.rrSeed << ','
-              << c.evalSeed << ',' << c.orderSeed << ',' << trainSpread << ',' << evalSpread << ','
-              << evalStandardError << ',' << evalLow << ',' << evalHigh << ','
-              << score << ',' << score/budget << ',' << feasible(r.mu,r.variance,z,budget) << ','
-              << r.items.size() << ',' << r.queries << ',' << r.milliseconds << ','
-              << rrMilliseconds << ',' << r.milliseconds+rrMilliseconds << ','
+    constexpr Real bytesPerMiB = 1024*1024;
+    Real algorithmMemoryMiB = Real(r.algorithmMemoryBytes)/bytesPerMiB;
+    Real sharedMemoryMiB = Real(sharedMemoryBytes)/bytesPerMiB;
+    Real totalMemoryMiB = algorithmMemoryMiB+sharedMemoryMiB;
+    std::cout << name << ',' << c.budgetRatio << ',' << budget << ',' << sumMu << ','
+              << trainSpread << ',' << evalSpread << ',' << r.queries << ',' << totalMemoryMiB << ',' << r.milliseconds << ','
+              << algorithmMemoryMiB << ',' << sharedMemoryMiB << ',' << r.milliseconds+rrMilliseconds << ','
+              << feasible(r.mu,r.variance,z,budget) << ',' << score << ',' << score/budget << ','
+              << r.items.size() << ',' << evalStandardError << ','
+              << evalLow << ',' << evalHigh << ',' << g.n << ',' << g.arcs << ','
+              << c.rrSamples << ',' << c.evalSamples << ',' << c.edgeProbability << ','
+              << c.epsilon << ',' << c.alpha << ',' << c.uncertainty << ',' << c.order << ','
+              << c.resourceSeed << ',' << c.rrSeed << ',' << c.evalSeed << ',' << c.orderSeed << ','
+              << rrMilliseconds << ','
               << r.tangents << ',' << r.peakStates << ',' << r.peakSlots << '\n';
-    std::cerr << name << " seeds:";
-    for (int e : r.items) std::cerr << ' ' << e;
-    std::cerr << '\n';
+    if (c.printSeeds) {
+        std::cerr << name << " seeds:";
+        for (int e : r.items) std::cerr << ' ' << e;
+        std::cerr << '\n';
+    }
 }
 
 int main(int argc, char** argv) {
@@ -477,10 +557,14 @@ int main(int argc, char** argv) {
         });
         RunResult greedy = offlineGreedy(graph, train, evaluation, resources, z, c.budget);
         RunResult streamed = focus(graph, train, evaluation, resources, order, z, c.budget, c.epsilon);
+        size_t sharedMemoryBytes = graphStorageBytes(graph)+resourcesStorageBytes(resources)+
+            rrStorageBytes(train)+rrStorageBytes(evaluation)+order.capacity()*sizeof(int);
         std::cout << std::setprecision(12)
-                  << "algorithm,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,B,uncertainty,order,resource_seed,rr_seed,eval_seed,order_seed,train_spread,eval_spread,eval_se,eval_ci95_low,eval_ci95_high,chance_score,score_over_B,feasible,size,queries,algorithm_ms,rr_generation_ms,total_ms,tangents,peak_active_states,peak_candidate_slots\n";
-        printResult("Offline_Greedy_CC",greedy,c,graph,train,evaluation,z,c.budget,rrMilliseconds);
-        printResult("FOCUS_RR",streamed,c,graph,train,evaluation,z,c.budget,rrMilliseconds);
+                  << "algorithm,budget_ratio,B,sum_mu,f_value,eval_f_value,queries,memory_mb_est,running_time_ms,algorithm_memory_mb_est,shared_memory_mb_est,total_time_ms,feasible,chance_score,score_over_B,size,eval_f_se,eval_f_ci95_low,eval_f_ci95_high,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,uncertainty,order,resource_seed,rr_seed,eval_seed,order_seed,rr_generation_ms,tangents,peak_active_states,peak_candidate_slots\n";
+        printResult("Offline_Greedy_CC",greedy,c,graph,train,evaluation,z,c.budget,
+                    resources.sumMu,rrMilliseconds,sharedMemoryBytes);
+        printResult("FOCUS_RR",streamed,c,graph,train,evaluation,z,c.budget,
+                    resources.sumMu,rrMilliseconds,sharedMemoryBytes);
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
         return 1;

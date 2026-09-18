@@ -8,13 +8,13 @@ File `facebook` trong thư mục này là edge list SNAP đã được kiểm tr
 - 176.468 cung có hướng, tương ứng 88.234 cạnh vô hướng được ghi theo cả hai chiều.
 - Dòng đầu chứa `4039 176468`; các dòng sau chứa `u v`.
 
-`experiment.cpp` dùng influence maximization theo mô hình Independent Cascade. Giá trị ảnh hưởng được ước lượng bằng một ngân hàng reverse-reachable (RR) cố định dùng chung cho FOCUS và Offline-Greedy-CC. Một ngân hàng RR độc lập được dùng để báo cáo `eval_spread`, giúp phát hiện việc quá khớp với các mẫu dùng khi tối ưu.
+`experiment.cpp` dùng influence maximization theo mô hình Independent Cascade. Giá trị ảnh hưởng được ước lượng bằng một ngân hàng reverse-reachable (RR) cố định dùng chung cho FOCUS và Offline-Greedy-CC. Một ngân hàng RR độc lập được dùng để báo cáo `eval_f_value`, giúp phát hiện việc quá khớp với các mẫu dùng khi tối ưu.
 
 Biên dịch và chạy từ thư mục `outputs`:
 
 ```bash
 c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
-./experiment --graph facebook --budget 100 --alpha 0.05 \
+./experiment --graph facebook --budget-ratio 0.01 --alpha 0.3 \
   --epsilon 0.02 --uncertainty 0.5 --p 0.01 \
   --rr-samples 50000 --eval-samples 100000 --order random \
   > facebook_results.csv
@@ -25,27 +25,33 @@ Hoặc dùng `Makefile`:
 ```bash
 make
 make run
-make run-one BUDGET=16 ALPHA=0.3
+make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 ```
 
-`make run` chạy lần lượt các ngân sách 16, 20, 24 và 28, rồi ghi CSV vào thư mục `results/`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
+`make run` chạy năm ngân sách bằng 1%, 2%, 3%, 4% và 5% tổng chi phí trung bình không nhiễu `sum(mu)`, rồi ghi một tệp văn bản dạng TSV tại `results/facebook_results.txt`. Tệp có một dòng tiêu đề và đúng một dòng dữ liệu cho mỗi giá trị `B`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
 
-Ngân sách `--budget` là giá trị tuyệt đối và không tự thay đổi khi quét `alpha`. Có thể dùng `--budget-ratio r` để đặt `B = r * sum(mu)`; cách này cũng độc lập với `alpha`. Không truyền đồng thời hai tùy chọn ngân sách.
+Mỗi dòng dữ liệu trong `facebook_results.txt` chứa `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`. Các cột được phân tách bằng tab nên có thể mở trực tiếp bằng trình soạn thảo văn bản hoặc nhập vào Excel.
+
+Mỗi chi phí trung bình `mu[e]` được sinh độc lập trong khoảng `(0,1)`. Độ lệch chuẩn là `sigma[e] = uncertainty * mu[e]`, nên mọi phương sai đều dương. Tùy chọn `--budget-ratio r` đặt `B = r * sum(mu)` và không phụ thuộc `alpha`. Không truyền đồng thời `--budget` và `--budget-ratio`.
 
 Các seed mặc định được tách riêng: tài nguyên 42, RR tối ưu 43, RR đánh giá 44 và thứ tự luồng 45. Có thể thay bằng `--resource-seed`, `--rr-seed`, `--eval-seed` và `--order-seed`. Giữ nguyên resource seed khi so sánh các giá trị `B`, `alpha` hoặc `epsilon`.
 
-Xác suất IC mặc định `p=0.01` là một cấu hình thực nghiệm đề xuất vì PDF chưa công bố tham số IC. Tương tự, PDF chưa nêu cách sinh `mu`, `variance`, số mẫu hay số lần lặp. Chương trình sinh `mu` đều trong `[1,10)` và đặt `sigma = uncertainty * mu`; cần ghi rõ các lựa chọn này khi báo cáo.
+Xác suất IC mặc định `p=0.01` là một cấu hình thực nghiệm đề xuất vì PDF chưa công bố tham số IC. Tương tự, PDF chưa nêu cách sinh `mu`, `variance`, số mẫu hay số lần lặp; cần ghi rõ các lựa chọn này khi báo cáo.
 
 Với RR coverage, hàm mục tiêu là đơn điệu. Vì vậy tập `S1` tự nó là nghiệm tối ưu của bài toán unconstrained trên các phần tử thuộc `S1`, và thay thế hợp lệ cho bước `BF-USM_1/2` mà không cần vét cạn. Chương trình lớn không tính `OPT`, vì việc vét cạn 4.039 đỉnh là bất khả thi.
 
-Các cột quan trọng:
+Các cột chính được đặt ở đầu mỗi dòng CSV:
 
-- `train_spread`: ảnh hưởng trên RR bank dùng bởi thuật toán.
-- `eval_spread`: ảnh hưởng trên RR bank độc lập, nên dùng làm số liệu chất lượng chính.
-- `eval_se`, `eval_ci95_low`, `eval_ci95_high`: sai số chuẩn và khoảng tin cậy chuẩn xấp xỉ 95% trên RR bank đánh giá độc lập. Đây là khoảng có điều kiện cho một nghiệm đã chọn; nó không thay thế việc lặp qua nhiều resource/RR/order seed.
-- `chance_score`, `score_over_B`, `feasible`: kiểm tra ràng buộc Gaussian.
-- `queries`, `algorithm_ms`: số truy vấn oracle và thời gian của riêng thuật toán.
-- `rr_generation_ms`, `total_ms`: thời gian sinh hai RR bank và `algorithm_ms + rr_generation_ms`. `total_ms` không gồm đọc graph, sinh tài nguyên, bước đánh giá cuối hay ghi CSV, nên không phải wall-clock end-to-end.
+- `budget_ratio`, `B`, `sum_mu`: tỷ lệ ngân sách, ngân sách thực và tổng chi phí trung bình không nhiễu.
+- `f_value`: giá trị hàm mục tiêu mà thuật toán tối ưu trên RR bank chung.
+- `eval_f_value`: giá trị của nghiệm trên RR bank đánh giá độc lập.
+- `queries`: số truy vấn oracle.
+- `memory_mb_est`: RAM ước lượng gồm dữ liệu dùng chung và cấu trúc của thuật toán.
+- `running_time_ms`: thời gian chạy riêng của thuật toán sau khi đã tạo RR bank.
+- `feasible`, `chance_score`, `score_over_B`: kiểm tra ràng buộc Gaussian.
+- `eval_f_se`, `eval_f_ci95_low`, `eval_f_ci95_high`: sai số chuẩn và khoảng tin cậy chuẩn xấp xỉ 95% trên RR bank đánh giá độc lập. Đây là khoảng có điều kiện cho một nghiệm đã chọn; nó không thay thế việc lặp qua nhiều resource/RR/order seed.
+- `algorithm_memory_mb_est`, `shared_memory_mb_est`: tách phần nhớ thuật toán và dữ liệu graph/RR dùng chung.
+- `rr_generation_ms`, `total_time_ms`: thời gian sinh hai RR bank và `running_time_ms + rr_generation_ms`. Tổng này không gồm đọc graph, sinh tài nguyên, bước đánh giá cuối hay ghi CSV.
 - `peak_active_states`, `peak_candidate_slots`: trạng thái FOCUS đang hoạt động và tổng định danh được giữ trong hai tập ứng viên.
 
 Hai cột `peak_*` là chỉ số cấu trúc thuật toán, không phải tổng RAM: chúng chưa tính terminal registry, bitset RR của từng candidate, hai RR bank và metadata của container. Khi báo cáo retained memory theo Phần 5, cần đo thêm peak RSS của tiến trình hoặc bổ sung bộ đếm byte.

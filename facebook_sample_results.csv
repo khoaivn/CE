@@ -1,3 +1,0 @@
-algorithm,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,B,uncertainty,order,resource_seed,rr_seed,eval_seed,order_seed,train_spread,eval_spread,eval_se,eval_ci95_low,eval_ci95_high,chance_score,score_over_B,feasible,size,queries,algorithm_ms,rr_generation_ms,total_ms,tangents,peak_active_states,peak_candidate_slots
-Offline_Greedy_CC,4039,176468,50000,100000,0.01,0.02,0.05,100,0.5,random,42,43,44,45,455.03374,441.0588,3.98359589836,433.250952039,448.866647961,99.0725772429,0.990725772429,1,69,265906,20.164708,948.386334,968.551042,0,0,0
-FOCUS_RR,4039,176468,50000,100000,0.01,0.02,0.05,100,0.5,random,42,43,44,45,382.00862,378.0504,3.72024657874,370.758716706,385.342083294,91.4394680432,0.914394680432,1,35,1811250,160.365042,948.386334,1108.751376,26,363,6167

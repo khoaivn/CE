@@ -11,6 +11,8 @@ IC_PROBABILITY ?= 0.01
 RR_SAMPLES ?= 50000
 EVAL_SAMPLES ?= 100000
 RESULT_DIR ?= results
+BUDGET_RATIOS ?= 0.01 0.02 0.03 0.04 0.05
+TEXT_RESULT ?= $(RESULT_DIR)/facebook_results.txt
 EXECUTABLE = $(if $(filter /%,$(TARGET)),$(TARGET),./$(TARGET))
 
 # GNU g++ accepts -fopenmp. Apple clang does not unless libomp is installed.
@@ -41,16 +43,29 @@ $(RESULT_DIR):
 	mkdir -p $@
 
 run: $(TARGET) | $(RESULT_DIR)
-	$(EXECUTABLE) $(COMMON_ARGS) --budget 16 > $(RESULT_DIR)/facebook_B16.csv
-	$(EXECUTABLE) $(COMMON_ARGS) --budget 20 > $(RESULT_DIR)/facebook_B20.csv
-	$(EXECUTABLE) $(COMMON_ARGS) --budget 24 > $(RESULT_DIR)/facebook_B24.csv
-	$(EXECUTABLE) $(COMMON_ARGS) --budget 28 > $(RESULT_DIR)/facebook_B28.csv
+	@printf 'budget_ratio\tB\tsum_mu\toffline_f_value\toffline_eval_f_value\toffline_queries\toffline_memory_mb_est\toffline_running_time_ms\tfocus_f_value\tfocus_eval_f_value\tfocus_queries\tfocus_memory_mb_est\tfocus_running_time_ms\n' > "$(TEXT_RESULT)"
+	@set -e; \
+	for ratio in $(BUDGET_RATIOS); do \
+		output="$$($(EXECUTABLE) $(COMMON_ARGS) --budget-ratio "$$ratio")"; \
+		row="$$(printf '%s\n' "$$output" | awk -F, ' \
+			BEGIN { OFS="\t" } \
+			NR == 1 { next } \
+			$$1 == "Offline_Greedy_CC" { br=$$2; b=$$3; sm=$$4; of=$$5; oef=$$6; oq=$$7; om=$$8; ot=$$9; have_offline=1 } \
+			$$1 == "FOCUS_RR" { fbr=$$2; fb=$$3; ff=$$5; fef=$$6; fq=$$7; fm=$$8; ft=$$9; have_focus=1 } \
+			END { \
+				if (!have_offline || !have_focus || br != fbr || b != fb) exit 1; \
+				print br,b,sm,of,oef,oq,om,ot,ff,fef,fq,fm,ft \
+			}')"; \
+		printf '%s\n' "$$row" >> "$(TEXT_RESULT)"; \
+	done
+	@echo "Wrote $(TEXT_RESULT)"
 
-# Ví dụ: make run-one BUDGET=16 ALPHA=0.3
+# Ví dụ: make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 run-one: $(TARGET) | $(RESULT_DIR)
-	@test -n "$(BUDGET)" || { echo "BUDGET is required" >&2; exit 2; }
-	$(EXECUTABLE) $(COMMON_ARGS) --budget $(BUDGET) \
-		> $(RESULT_DIR)/facebook_B$(BUDGET)_alpha$(ALPHA).csv
+	@test -n "$(BUDGET_RATIO)" || { echo "BUDGET_RATIO is required" >&2; exit 2; }
+	@$(MAKE) --no-print-directory run \
+		BUDGET_RATIOS="$(BUDGET_RATIO)" \
+		TEXT_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA).txt"
 
 clean:
 	rm -f $(TARGET)
