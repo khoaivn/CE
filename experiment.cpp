@@ -6,11 +6,9 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <map>
 #include <numeric>
 #include <queue>
 #include <random>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
@@ -201,6 +199,9 @@ struct Candidate
     std::vector<uint64_t> covered;
     uint32_t hits = 0;
     Real mu = 0, variance = 0;
+    // An empty candidate represents an all-zero RR bitmap. Allocate the
+    // bitmap only when the first item is accepted; FOCUS creates thousands of
+    // short-lived candidates that otherwise pay this cost up front.
     explicit Candidate(size_t words = 0) : covered(words, 0) {}
 };
 
@@ -224,8 +225,11 @@ public:
     uint32_t marginalHits(const Candidate &set, int e)
     {
         ++queries;
+        const auto &incidence = bank.incidence[static_cast<size_t>(e)];
+        if (set.covered.empty())
+            return static_cast<uint32_t>(incidence.size());
         uint32_t result = 0;
-        for (uint32_t r : bank.incidence[static_cast<size_t>(e)])
+        for (uint32_t r : incidence)
             if (!(set.covered[r >> 6] & (uint64_t(1) << (r & 63))))
                 ++result;
         return result;
@@ -236,6 +240,8 @@ public:
 void addItem(Candidate &set, int e, uint32_t marginal, const RRBank &bank,
              const Resources &resources)
 {
+    if (set.covered.empty())
+        set.covered.assign(bank.words, 0);
     for (uint32_t r : bank.incidence[static_cast<size_t>(e)])
         set.covered[r >> 6] |= uint64_t(1) << (r & 63);
     set.hits += marginal;
@@ -375,36 +381,65 @@ struct State
 {
     Candidate first, second;
     Real firstCost = 0, secondCost = 0;
-    explicit State(size_t words = 0) : first(words), second(words) {}
+    Real guess = 0, threshold = 0;
+    explicit State(Real guessValue = 0)
+        : guess(guessValue), threshold(guessValue / 4) {}
 };
 struct Tangent
 {
     Real theta = 0, capacity = 0, maxSingleton = 0, maxDensity = 0;
-    std::map<int, State> active;
-    std::set<int> retired;
+    Real lower = 0, upper = 0;
+    int firstK = 0, lastK = 0, nextK = 0;
+    bool constantsInitialized = false;
+    bool initialized = false;
+    bool valueRangeInitialized = false;
+    bool frontierInitialized = false;
+    // Eligible k values are created in increasing order and only removed from
+    // the low end. A head index keeps traversal contiguous, while occasional
+    // compaction releases retired candidates and bounds retained memory.
+    std::vector<State> active;
+    size_t activeBegin = 0;
+
+    bool activeEmpty() const { return activeBegin == active.size(); }
+    State &activeFront() { return active[activeBegin]; }
+    void popActiveFront()
+    {
+        active[activeBegin] = State();
+        ++activeBegin;
+        if (activeBegin == active.size())
+        {
+            active.clear();
+            activeBegin = 0;
+        }
+    }
+    void compactActive()
+    {
+        if (activeBegin >= 32 && activeBegin * 2 >= active.size())
+        {
+            active.erase(active.begin(), active.begin() + activeBegin);
+            activeBegin = 0;
+        }
+    }
 };
 
-size_t tangentStorageBytes(const Tangent &tangent)
+size_t tangentDynamicBytes(const Tangent &tangent)
 {
-    size_t bytes = sizeof(std::pair<const int, Tangent>) + 3 * sizeof(void *) +
-                   tangent.retired.size() * (sizeof(int) + 3 * sizeof(void *));
-    for (const auto &[k, state] : tangent.active)
+    size_t bytes = tangent.active.capacity() * sizeof(State);
+    for (size_t i = tangent.activeBegin; i < tangent.active.size(); ++i)
     {
-        (void)k;
-        bytes += sizeof(std::pair<const int, State>) + 3 * sizeof(void *) +
-                 candidateDynamicBytes(state.first) + candidateDynamicBytes(state.second);
+        const State &state = tangent.active[i];
+        bytes += candidateDynamicBytes(state.first) + candidateDynamicBytes(state.second);
     }
     return bytes;
 }
 
-size_t focusStorageBytes(const Candidate &best, const std::map<int, Tangent> &tangents)
+size_t focusStorageBytes(const Candidate &best, const std::vector<Tangent> &tangents)
 {
-    size_t bytes = sizeof(tangents) + sizeof(best) + candidateDynamicBytes(best);
-    for (const auto &[j, tangent] : tangents)
-    {
-        (void)j;
-        bytes += tangentStorageBytes(tangent);
-    }
+    size_t bytes = sizeof(tangents) + tangents.capacity() * sizeof(Tangent) +
+                   sizeof(best) + candidateDynamicBytes(best);
+    for (const Tangent &tangent : tangents)
+        if (tangent.initialized)
+            bytes += tangentDynamicBytes(tangent);
     return bytes;
 }
 
@@ -425,8 +460,11 @@ RunResult focus(const Graph &g, const RRBank &train, const RRBank &evaluation,
     auto started = Clock::now();
     const Real delta = 16 * epsilon, logValueBase = std::log1p(delta);
     const Real tangentBase = std::log(1.5L), top = budget / z;
-    std::map<int, Tangent> tangents;
-    Candidate best(train.words);
+    const Real logTop = std::log(top);
+    std::vector<Tangent> tangents;
+    int tangentOffset = 0;
+    size_t tangentCount = 0;
+    Candidate best;
     for (int e : order)
     {
         uint32_t singletonHits = oracle.singletonHits(e);
@@ -436,7 +474,7 @@ RunResult focus(const Graph &g, const RRBank &train, const RRBank &evaluation,
             continue;
         if (singletonHits > best.hits)
         {
-            best = Candidate(train.words);
+            best = Candidate();
             addItem(best, e, singletonHits, train, resources);
         }
         Real A = budget - mu;
@@ -446,109 +484,166 @@ RunResult focus(const Graph &g, const RRBank &train, const RRBank &evaluation,
         if (!(tMinus > 0 && tPlus > 0 && std::isfinite(tMinus) && std::isfinite(tPlus)))
             throw std::runtime_error("Invalid tangent interval");
         auto [firstJ, lastJ] = checkedIndexRange(
-            std::max(Real(0), std::floor((std::log(top) - std::log(std::min(top, tPlus))) / tangentBase) - 2),
-            std::ceil((std::log(top) - std::log(tMinus)) / tangentBase) + 2,
+            std::max(Real(0), std::floor((logTop - std::log(std::min(top, tPlus))) / tangentBase) - 2),
+            std::ceil((logTop - std::log(tMinus)) / tangentBase) + 2,
             "Tangent range is too wide");
+        if (tangents.empty())
+        {
+            tangentOffset = firstJ;
+            tangents.resize(static_cast<size_t>(lastJ - firstJ) + 1);
+        }
+        else
+        {
+            if (firstJ < tangentOffset)
+            {
+                size_t prepend = static_cast<size_t>(tangentOffset - firstJ);
+                tangents.insert(tangents.begin(), prepend, Tangent());
+                tangentOffset = firstJ;
+            }
+            size_t requiredSize = static_cast<size_t>(lastJ - tangentOffset) + 1;
+            if (requiredSize > tangents.size())
+                tangents.resize(requiredSize);
+        }
         for (int j = firstJ; j <= lastJ; ++j)
         {
-            Real theta = top * std::pow(1.5L, -j);
-            Real capacity = budget - z * theta / 2;
-            Real normalized = (mu + z * var / (2 * theta)) / capacity;
+            Tangent &tangent = tangents[static_cast<size_t>(j - tangentOffset)];
+            if (!tangent.constantsInitialized)
+            {
+                tangent.theta = top * std::pow(1.5L, -j);
+                tangent.capacity = budget - z * tangent.theta / 2;
+                tangent.constantsInitialized = true;
+            }
+            Real normalized = (mu + z * var / (2 * tangent.theta)) / tangent.capacity;
             if (!std::isfinite(normalized) || normalized > 1)
                 continue;
-            auto [where, inserted] = tangents.try_emplace(j);
-            Tangent &tangent = where->second;
-            if (inserted)
+            if (!tangent.initialized)
             {
-                tangent.theta = theta;
-                tangent.capacity = capacity;
+                tangent.initialized = true;
+                ++tangentCount;
             }
-            tangent.maxSingleton = std::max(tangent.maxSingleton, singletonValue);
-            tangent.maxDensity = std::max(tangent.maxDensity, singletonValue / normalized);
+            // The tangent cost is a deterministic upper bound for the
+            // Gaussian chance cost: sqrt(V) <= V/(2*theta) + theta/2.
+            // Therefore normalized total cost <= 1 already implies the
+            // original chance constraint and avoids a sqrt for every state.
+            Real singletonDensity = singletonValue / normalized;
+            bool valueRangeChanged = false;
+            if (singletonValue > tangent.maxSingleton)
+            {
+                tangent.maxSingleton = singletonValue;
+                valueRangeChanged = true;
+            }
+            if (singletonDensity > tangent.maxDensity)
+            {
+                tangent.maxDensity = singletonDensity;
+                valueRangeChanged = true;
+            }
             if (tangent.maxSingleton == 0)
                 continue;
-            Real lower = tangent.maxSingleton / (1 + delta), upper = 4 * tangent.maxDensity;
-            auto [firstK, lastK] = checkedIndexRange(
-                std::floor(std::log(lower) / logValueBase) - 1,
-                std::ceil(std::log(upper) / logValueBase) + 1,
-                "Value range is too wide; increase epsilon");
-            for (int k = firstK; k <= lastK; ++k)
+            if (valueRangeChanged || !tangent.valueRangeInitialized)
             {
+                tangent.lower = tangent.maxSingleton / (1 + delta);
+                tangent.upper = 4 * tangent.maxDensity;
+                auto range = checkedIndexRange(
+                    std::floor(std::log(tangent.lower) / logValueBase) - 1,
+                    std::ceil(std::log(tangent.upper) / logValueBase) + 1,
+                    "Value range is too wide; increase epsilon");
+                tangent.firstK = range.first;
+                tangent.lastK = range.second;
+                tangent.valueRangeInitialized = true;
+            }
+            const Real lower = tangent.lower, upper = tangent.upper;
+
+            if (!tangent.frontierInitialized)
+            {
+                tangent.nextK = tangent.firstK;
+                tangent.frontierInitialized = true;
+            }
+            else if (tangent.nextK < tangent.firstK)
+            {
+                tangent.nextK = tangent.firstK;
+            }
+
+            while (tangent.nextK <= tangent.lastK)
+            {
+                int k = tangent.nextK;
                 Real guess = std::exp(k * logValueBase);
-                if (guess >= lower && guess <= upper && !tangent.retired.count(k))
-                    tangent.active.try_emplace(k, train.words);
+                if (guess > upper)
+                    break;
+                ++tangent.nextK;
+                if (guess >= lower)
+                    tangent.active.emplace_back(guess);
             }
-            for (auto it = tangent.active.begin(); it != tangent.active.end();)
+
+            while (!tangent.activeEmpty() &&
+                   tangent.activeFront().guess < lower)
+                tangent.popActiveFront();
+
+            if (normalized >= 0.5L)
             {
-                Real guess = std::exp(it->first * logValueBase);
-                if (guess < lower)
-                    it = tangent.active.erase(it);
-                else
-                    ++it;
+                while (!tangent.activeEmpty() &&
+                       singletonDensity >= tangent.activeFront().threshold)
+                    tangent.popActiveFront();
             }
-            for (auto it = tangent.retired.begin(); it != tangent.retired.end();)
+            tangent.compactActive();
+
+            for (size_t stateIndex = tangent.activeBegin;
+                 stateIndex < tangent.active.size(); ++stateIndex)
             {
-                if (std::exp(*it * logValueBase) < lower)
-                    it = tangent.retired.erase(it);
-                else
-                    ++it;
-            }
-            for (auto it = tangent.active.begin(); it != tangent.active.end();)
-            {
-                int k = it->first;
-                State &state = it->second;
-                Real threshold = std::exp(k * logValueBase) / 4;
-                if (normalized >= 0.5L && singletonValue / normalized >= threshold)
-                {
-                    tangent.retired.insert(k);
-                    it = tangent.active.erase(it);
-                    continue;
-                }
+                State &state = tangent.active[stateIndex];
+                Real threshold = state.threshold;
+                Real requiredValue = threshold * normalized;
+                // RR coverage is submodular, so an item's marginal gain is at
+                // most its singleton gain. Thresholds increase along the
+                // deque, so failure here also rejects every later state.
+                if (singletonValue < requiredValue)
+                    break;
+
                 bool added = false;
-                if (state.firstCost + normalized <= 1 &&
-                    feasible(state.first.mu + mu, state.first.variance + var, z, budget))
+                if (state.firstCost + normalized <= 1)
                 {
-                    uint32_t marginal = oracle.marginalHits(state.first, e);
-                    if (oracle.toSpread(marginal) >= threshold * normalized)
+                    uint32_t marginal = state.first.items.empty()
+                                            ? singletonHits
+                                            : oracle.marginalHits(state.first, e);
+                    if (oracle.toSpread(marginal) >= requiredValue)
                     {
                         addItem(state.first, e, marginal, train, resources);
                         state.firstCost += normalized;
                         added = true;
                     }
                 }
-                if (!added && state.secondCost + normalized <= 1 &&
-                    feasible(state.second.mu + mu, state.second.variance + var, z, budget))
+                if (!added && state.secondCost + normalized <= 1)
                 {
-                    uint32_t marginal = oracle.marginalHits(state.second, e);
-                    if (oracle.toSpread(marginal) >= threshold * normalized)
+                    uint32_t marginal = state.second.items.empty()
+                                            ? singletonHits
+                                            : oracle.marginalHits(state.second, e);
+                    if (oracle.toSpread(marginal) >= requiredValue)
                     {
                         addItem(state.second, e, marginal, train, resources);
                         state.secondCost += normalized;
                     }
                 }
-                ++it;
             }
         }
     }
     // RR coverage is monotone, so S1 itself is an optimal unconstrained subset of S1.
-    for (const auto &[j, tangent] : tangents)
-        for (const auto &[k, state] : tangent.active)
-        {
-            (void)j;
-            (void)k;
-            consider(oracle, state.first, best);
-            consider(oracle, state.second, best);
-        }
+    for (const Tangent &tangent : tangents)
+        if (tangent.initialized)
+            for (size_t i = tangent.activeBegin; i < tangent.active.size(); ++i)
+            {
+                const State &state = tangent.active[i];
+                consider(oracle, state.first, best);
+                consider(oracle, state.second, best);
+            }
     auto finished = Clock::now();
     size_t activeStates = 0, candidateSlots = 0;
-    for (const auto &[j, tangent] : tangents)
-        for (const auto &[k, state] : tangent.active)
-        {
-            (void)j;
-            (void)k;
-            ++activeStates;
-            candidateSlots += state.first.items.size() + state.second.items.size();
-        }
+    for (const Tangent &tangent : tangents)
+        if (tangent.initialized)
+            for (size_t i = tangent.activeBegin; i < tangent.active.size(); ++i)
+            {
+                const State &state = tangent.active[i];
+                ++activeStates;
+                candidateSlots += state.first.items.size() + state.second.items.size();
+            }
     RunResult result;
     result.items = best.items;
     result.trainHits = best.hits;
@@ -557,7 +652,7 @@ RunResult focus(const Graph &g, const RRBank &train, const RRBank &evaluation,
     result.variance = best.variance;
     result.queries = oracle.queries;
     result.milliseconds = std::chrono::duration<double, std::milli>(finished - started).count();
-    result.tangents = tangents.size();
+    result.tangents = tangentCount;
     result.activeStates = activeStates;
     result.candidateSlots = candidateSlots;
     result.algorithmMemoryBytes = focusStorageBytes(best, tangents);
