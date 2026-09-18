@@ -6,13 +6,14 @@ TARGET := experiment.o
 GRAPH ?= facebook
 ALPHA ?= 0.3
 EPSILON ?= 0.02
-UNCERTAINTY ?= 0.5
 IC_PROBABILITY ?= 0.01
 RR_SAMPLES ?= 50000
 EVAL_SAMPLES ?= 100000
 RESULT_DIR ?= results
 BUDGET_RATIOS ?= 0.01 0.02 0.03 0.04 0.05
 TEXT_RESULT ?= $(RESULT_DIR)/facebook_results.txt
+OFFLINE_RESULT ?= $(RESULT_DIR)/facebook_offline_metrics.txt
+FOCUS_RESULT ?= $(RESULT_DIR)/facebook_focus_metrics.txt
 EXECUTABLE = $(if $(filter /%,$(TARGET)),$(TARGET),./$(TARGET))
 
 # GNU g++ accepts -fopenmp. Apple clang does not unless libomp is installed.
@@ -25,7 +26,6 @@ OPENMP_FLAG := $(shell printf 'int main(){}\n' | \
 COMMON_ARGS := --graph $(GRAPH) \
 	--alpha $(ALPHA) \
 	--epsilon $(EPSILON) \
-	--uncertainty $(UNCERTAINTY) \
 	--p $(IC_PROBABILITY) \
 	--rr-samples $(RR_SAMPLES) \
 	--eval-samples $(EVAL_SAMPLES)
@@ -44,6 +44,8 @@ $(RESULT_DIR):
 
 run: $(TARGET) | $(RESULT_DIR)
 	@printf 'budget_ratio\tB\tsum_mu\toffline_f_value\toffline_eval_f_value\toffline_queries\toffline_memory_mb_est\toffline_running_time_ms\tfocus_f_value\tfocus_eval_f_value\tfocus_queries\tfocus_memory_mb_est\tfocus_running_time_ms\n' > "$(TEXT_RESULT)"
+	@printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' > "$(OFFLINE_RESULT)"
+	@printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' > "$(FOCUS_RESULT)"
 	@set -e; \
 	for ratio in $(BUDGET_RATIOS); do \
 		output="$$($(EXECUTABLE) $(COMMON_ARGS) --budget-ratio "$$ratio")"; \
@@ -57,15 +59,21 @@ run: $(TARGET) | $(RESULT_DIR)
 				print br,b,sm,of,oef,oq,om,ot,ff,fef,fq,fm,ft \
 			}')"; \
 		printf '%s\n' "$$row" >> "$(TEXT_RESULT)"; \
+		printf '%s\n' "$$row" | awk 'BEGIN { FS=OFS="\t" } { print sprintf("%g%%", $$1*100),$$2,$$4,$$6,$$7,$$8 }' >> "$(OFFLINE_RESULT)"; \
+		printf '%s\n' "$$row" | awk 'BEGIN { FS=OFS="\t" } { print sprintf("%g%%", $$1*100),$$2,$$9,$$11,$$12,$$13 }' >> "$(FOCUS_RESULT)"; \
 	done
 	@echo "Wrote $(TEXT_RESULT)"
+	@echo "Wrote $(OFFLINE_RESULT)"
+	@echo "Wrote $(FOCUS_RESULT)"
 
 # Ví dụ: make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 run-one: $(TARGET) | $(RESULT_DIR)
 	@test -n "$(BUDGET_RATIO)" || { echo "BUDGET_RATIO is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory run \
 		BUDGET_RATIOS="$(BUDGET_RATIO)" \
-		TEXT_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA).txt"
+		TEXT_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA).txt" \
+		OFFLINE_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_offline_metrics.txt" \
+		FOCUS_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_focus_metrics.txt"
 
 clean:
 	rm -f $(TARGET)

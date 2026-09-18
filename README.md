@@ -6,7 +6,8 @@ File `facebook` trong thư mục này là edge list SNAP đã được kiểm tr
 
 - 4.039 đỉnh, đánh số từ 0 đến 4038.
 - 176.468 cung có hướng, tương ứng 88.234 cạnh vô hướng được ghi theo cả hai chiều.
-- Dòng đầu chứa `4039 176468`; các dòng sau chứa `u v`.
+- Dòng đầu chứa `4039 176468`; tiếp theo là 176.468 dòng cạnh `u v`.
+- Phần `VERTEX_GAUSSIAN_COSTS_V1 4039` nằm sau các cạnh, tiếp theo là 4.039 dòng `vertex_id mu variance`. Chi phí ngẫu nhiên của đỉnh `e` tuân theo `N(mu[e], variance[e])`.
 
 `experiment.cpp` dùng influence maximization theo mô hình Independent Cascade. Giá trị ảnh hưởng được ước lượng bằng một ngân hàng reverse-reachable (RR) cố định dùng chung cho FOCUS và Offline-Greedy-CC. Một ngân hàng RR độc lập được dùng để báo cáo `eval_f_value`, giúp phát hiện việc quá khớp với các mẫu dùng khi tối ưu.
 
@@ -15,7 +16,7 @@ Biên dịch và chạy từ thư mục `outputs`:
 ```bash
 c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
 ./experiment --graph facebook --budget-ratio 0.01 --alpha 0.3 \
-  --epsilon 0.02 --uncertainty 0.5 --p 0.01 \
+  --epsilon 0.02 --p 0.01 \
   --rr-samples 50000 --eval-samples 100000 --order random \
   > facebook_results.csv
 ```
@@ -28,13 +29,19 @@ make run
 make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 ```
 
-`make run` chạy năm ngân sách bằng 1%, 2%, 3%, 4% và 5% tổng chi phí trung bình không nhiễu `sum(mu)`, rồi ghi một tệp văn bản dạng TSV tại `results/facebook_results.txt`. Tệp có một dòng tiêu đề và đúng một dòng dữ liệu cho mỗi giá trị `B`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
+`make run` chạy năm ngân sách bằng 1%, 2%, 3%, 4% và 5% tổng chi phí trung bình không nhiễu `sum(mu)`, rồi ghi ba tệp văn bản dạng TSV. Cả ba tệp có một dòng tiêu đề và đúng một dòng dữ liệu cho mỗi giá trị `B`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
 
-Mỗi dòng dữ liệu trong `facebook_results.txt` chứa `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`. Các cột được phân tách bằng tab nên có thể mở trực tiếp bằng trình soạn thảo văn bản hoặc nhập vào Excel.
+- `results/facebook_results.txt` giữ định dạng hiện tại: `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`.
+- `results/facebook_offline_metrics.txt` chỉ chứa kết quả của `Offline_Greedy_CC`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
+- `results/facebook_focus_metrics.txt` chỉ chứa kết quả của `FOCUS_RR`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
 
-Mỗi chi phí trung bình `mu[e]` được sinh độc lập trong khoảng `(0,1)`. Độ lệch chuẩn là `sigma[e] = uncertainty * mu[e]`, nên mọi phương sai đều dương. Tùy chọn `--budget-ratio r` đặt `B = r * sum(mu)` và không phụ thuộc `alpha`. Không truyền đồng thời `--budget` và `--budget-ratio`.
+Cột `%B` hiển thị tỷ lệ ngân sách dưới dạng phần trăm, chẳng hạn `1%`; cột `B` bên cạnh là giá trị ngân sách thực bằng tỷ lệ đó nhân với `sum_mu`.
 
-Các seed mặc định được tách riêng: tài nguyên 42, RR tối ưu 43, RR đánh giá 44 và thứ tự luồng 45. Có thể thay bằng `--resource-seed`, `--rr-seed`, `--eval-seed` và `--order-seed`. Giữ nguyên resource seed khi so sánh các giá trị `B`, `alpha` hoặc `epsilon`.
+Các cột được phân tách bằng tab nên có thể mở trực tiếp bằng trình soạn thảo văn bản hoặc nhập vào Excel.
+
+Các giá trị tài nguyên đã được ghi cố định trong file `facebook`: `mu[e]` ban đầu được sinh độc lập trong khoảng `(0,1)` với seed 42 và `variance[e] = (0.5 * mu[e])^2`. Chương trình chỉ đọc `mu` và `variance`; nó không sinh lại chi phí khi chạy. Tùy chọn `--budget-ratio r` đặt `B = r * sum(mu)` và không phụ thuộc `alpha`. Không truyền đồng thời `--budget` và `--budget-ratio`.
+
+Các seed chạy mặc định được tách riêng: RR tối ưu 43, RR đánh giá 44 và thứ tự luồng 45. Có thể thay bằng `--rr-seed`, `--eval-seed` và `--order-seed`. Dữ liệu chi phí không còn phụ thuộc tùy chọn dòng lệnh.
 
 Xác suất IC mặc định `p=0.01` là một cấu hình thực nghiệm đề xuất vì PDF chưa công bố tham số IC. Tương tự, PDF chưa nêu cách sinh `mu`, `variance`, số mẫu hay số lần lặp; cần ghi rõ các lựa chọn này khi báo cáo.
 
@@ -47,14 +54,14 @@ Các cột chính được đặt ở đầu mỗi dòng CSV:
 - `eval_f_value`: giá trị của nghiệm trên RR bank đánh giá độc lập.
 - `queries`: số truy vấn oracle.
 - `memory_mb_est`: RAM ước lượng gồm dữ liệu dùng chung và cấu trúc của thuật toán.
-- `running_time_ms`: thời gian chạy riêng của thuật toán sau khi đã tạo RR bank.
+- `running_time_ms`: thời gian chạy riêng của thuật toán. Nó không gồm đọc graph và chi phí, tạo RR bank, sắp thứ tự đầu vào, đánh giá nghiệm độc lập hay ghi output.
 - `feasible`, `chance_score`, `score_over_B`: kiểm tra ràng buộc Gaussian.
 - `eval_f_se`, `eval_f_ci95_low`, `eval_f_ci95_high`: sai số chuẩn và khoảng tin cậy chuẩn xấp xỉ 95% trên RR bank đánh giá độc lập. Đây là khoảng có điều kiện cho một nghiệm đã chọn; nó không thay thế việc lặp qua nhiều resource/RR/order seed.
 - `algorithm_memory_mb_est`, `shared_memory_mb_est`: tách phần nhớ thuật toán và dữ liệu graph/RR dùng chung.
-- `rr_generation_ms`, `total_time_ms`: thời gian sinh hai RR bank và `running_time_ms + rr_generation_ms`. Tổng này không gồm đọc graph, sinh tài nguyên, bước đánh giá cuối hay ghi CSV.
-- `peak_active_states`, `peak_candidate_slots`: trạng thái FOCUS đang hoạt động và tổng định danh được giữ trong hai tập ứng viên.
+- `rr_generation_ms`, `total_time_ms`: thời gian sinh hai RR bank và `running_time_ms + rr_generation_ms`. Tổng này không gồm đọc graph và chi phí, sắp thứ tự đầu vào, bước đánh giá cuối hay ghi CSV.
+- `retained_active_states`, `retained_candidate_slots`: trạng thái FOCUS và tổng định danh còn được giữ khi thuật toán kết thúc.
 
-Hai cột `peak_*` là chỉ số cấu trúc thuật toán, không phải tổng RAM: chúng chưa tính terminal registry, bitset RR của từng candidate, hai RR bank và metadata của container. Khi báo cáo retained memory theo Phần 5, cần đo thêm peak RSS của tiến trình hoặc bổ sung bộ đếm byte.
+Hai cột `retained_*` là chỉ số cấu trúc thuật toán, không phải tổng RAM. Việc tổng hợp các chỉ số và ước lượng bộ nhớ được thực hiện sau khi dừng đồng hồ, nên không bị tính vào `running_time_ms`. `memory_mb_est` là ước lượng bộ nhớ được giữ ở cuối thuật toán cùng dữ liệu dùng chung; nó không phải peak RSS của tiến trình.
 
 Chương trình giữ cách hiểu theo phần diễn giải của tài liệu rằng trạng thái đi qua nhánh big-item trở thành terminal vĩnh viễn. Registry terminal không được tính là trạng thái active.
 
