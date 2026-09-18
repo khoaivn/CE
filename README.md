@@ -1,19 +1,67 @@
-# Thực nghiệm C++17: Gaussian chance-constrained maximum cut
+# Thực nghiệm C++17: FOCUS với ràng buộc Gaussian
 
-Mã độc lập, chỉ dùng thư viện chuẩn C++17. Đây là bộ kiểm chứng trên dữ liệu nhỏ (1–20 đỉnh), không phải bản triển khai quy mô lớn với độ phức tạp của bài báo.
+## Chạy toàn bộ dữ liệu Facebook theo Phần 5
+
+File `facebook` trong thư mục này là edge list SNAP đã được kiểm tra:
+
+- 4.039 đỉnh, đánh số từ 0 đến 4038.
+- 176.468 cung có hướng, tương ứng 88.234 cạnh vô hướng được ghi theo cả hai chiều.
+- Dòng đầu chứa `4039 176468`; các dòng sau chứa `u v`.
+
+`experiment.cpp` dùng influence maximization theo mô hình Independent Cascade. Giá trị ảnh hưởng được ước lượng bằng một ngân hàng reverse-reachable (RR) cố định dùng chung cho FOCUS và Offline-Greedy-CC. Một ngân hàng RR độc lập được dùng để báo cáo `eval_spread`, giúp phát hiện việc quá khớp với các mẫu dùng khi tối ưu.
+
+Biên dịch và chạy từ thư mục `outputs`:
+
+```bash
+c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
+./experiment --graph facebook --budget 100 --alpha 0.05 \
+  --epsilon 0.02 --uncertainty 0.5 --p 0.01 \
+  --rr-samples 50000 --eval-samples 100000 --order random \
+  > facebook_results.csv
+```
+
+Ngân sách `--budget` là giá trị tuyệt đối và không tự thay đổi khi quét `alpha`. Có thể dùng `--budget-ratio r` để đặt `B = r * sum(mu)`; cách này cũng độc lập với `alpha`. Không truyền đồng thời hai tùy chọn ngân sách.
+
+Các seed mặc định được tách riêng: tài nguyên 42, RR tối ưu 43, RR đánh giá 44 và thứ tự luồng 45. Có thể thay bằng `--resource-seed`, `--rr-seed`, `--eval-seed` và `--order-seed`. Giữ nguyên resource seed khi so sánh các giá trị `B`, `alpha` hoặc `epsilon`.
+
+Xác suất IC mặc định `p=0.01` là một cấu hình thực nghiệm đề xuất vì PDF chưa công bố tham số IC. Tương tự, PDF chưa nêu cách sinh `mu`, `variance`, số mẫu hay số lần lặp. Chương trình sinh `mu` đều trong `[1,10)` và đặt `sigma = uncertainty * mu`; cần ghi rõ các lựa chọn này khi báo cáo.
+
+Với RR coverage, hàm mục tiêu là đơn điệu. Vì vậy tập `S1` tự nó là nghiệm tối ưu của bài toán unconstrained trên các phần tử thuộc `S1`, và thay thế hợp lệ cho bước `BF-USM_1/2` mà không cần vét cạn. Chương trình lớn không tính `OPT`, vì việc vét cạn 4.039 đỉnh là bất khả thi.
+
+Các cột quan trọng:
+
+- `train_spread`: ảnh hưởng trên RR bank dùng bởi thuật toán.
+- `eval_spread`: ảnh hưởng trên RR bank độc lập, nên dùng làm số liệu chất lượng chính.
+- `eval_se`, `eval_ci95_low`, `eval_ci95_high`: sai số chuẩn và khoảng tin cậy chuẩn xấp xỉ 95% trên RR bank đánh giá độc lập. Đây là khoảng có điều kiện cho một nghiệm đã chọn; nó không thay thế việc lặp qua nhiều resource/RR/order seed.
+- `chance_score`, `score_over_B`, `feasible`: kiểm tra ràng buộc Gaussian.
+- `queries`, `algorithm_ms`: số truy vấn oracle và thời gian của riêng thuật toán.
+- `rr_generation_ms`, `total_ms`: thời gian sinh hai RR bank và `algorithm_ms + rr_generation_ms`. `total_ms` không gồm đọc graph, sinh tài nguyên, bước đánh giá cuối hay ghi CSV, nên không phải wall-clock end-to-end.
+- `peak_active_states`, `peak_candidate_slots`: trạng thái FOCUS đang hoạt động và tổng định danh được giữ trong hai tập ứng viên.
+
+Hai cột `peak_*` là chỉ số cấu trúc thuật toán, không phải tổng RAM: chúng chưa tính terminal registry, bitset RR của từng candidate, hai RR bank và metadata của container. Khi báo cáo retained memory theo Phần 5, cần đo thêm peak RSS của tiến trình hoặc bổ sung bộ đếm byte.
+
+Chương trình giữ cách hiểu theo phần diễn giải của tài liệu rằng trạng thái đi qua nhánh big-item trở thành terminal vĩnh viễn. Registry terminal không được tính là trạng thái active.
+
+`facebook_sample_results.csv` là kết quả cấu hình mặc định. Danh sách seed được in ra stderr để stdout luôn là CSV sạch.
+
+---
+
+## Bộ kiểm chứng nhỏ được giữ lại
+
+`experiment_small.cpp` là mã max-cut trước đây, dùng để đối chiếu OPT trên dữ liệu nhỏ 1–20 đỉnh. `facebook_experiment.cpp` được giữ làm tên tương thích và chỉ nạp `experiment.cpp`.
 
 ## Biên dịch và chạy
 
 ```bash
-c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
-./experiment > results.csv
+c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment_small.cpp -o experiment_small
+./experiment_small > results.csv
 ```
 
 Tham số theo thứ tự:
 
 ```text
-./experiment n seed epsilon alpha budget_ratio uncertainty order
-./experiment 18 42 0.02 0.05 0.2 0.5 random > results.csv
+./experiment_small n seed epsilon alpha budget_ratio uncertainty order
+./experiment_small 18 42 0.02 0.05 0.2 0.5 random > results.csv
 ```
 
 Mặc định: `16 42 0.02 0.05 0.2 0.5 random`.

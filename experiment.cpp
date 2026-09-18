@@ -2,337 +2,486 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <queue>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
-// C++17. Small-instance verification of Algorithm 1 in the supplied paper.
-// Exact exhaustive USM replaces BF-USM: stronger value, exponential cost.
-// Floating-point arithmetic does NOT implement the paper's exact-real model.
-using Mask = uint64_t;
+// Scalable C++17 experiment for the Facebook edge list. Influence is estimated
+// with one fixed bank of reverse-reachable (RR) sets shared by both algorithms.
 using Real = long double;
-struct Instance
-{
-    int n;
-    std::vector<std::vector<Real>> w;
-    std::vector<Real> mu, variance, value;
-    Real B, z;
-    uint64_t queries = 0;
-    Real f(Mask s)
-    {
-        ++queries;
-        return value.at(s);
-    }
-    Real score(Mask s) const
-    {
-        Real m = 0, v = 0;
-        for (int e = 0; e < n; ++e)
-            if (s & (Mask(1) << e))
-            {
-                m += mu[e];
-                v += variance[e];
-            }
-        return m + z * std::sqrt(v);
-    }
-    bool feasible(Mask s) const { return score(s) <= B; }
+using Clock = std::chrono::steady_clock;
+
+struct Config {
+    std::string graph = "facebook";
+    std::string order = "random";
+    size_t rrSamples = 50000, evalSamples = 100000;
+    Real edgeProbability = 0.01L, epsilon = 0.02L, alpha = 0.05L;
+    Real budget = 100.0L, budgetRatio = -1.0L, uncertainty = 0.5L;
+    uint64_t resourceSeed = 42, rrSeed = 43, evalSeed = 44, orderSeed = 45;
 };
-Real quantile(Real alpha)
-{
-    Real lo = 0, hi = 12;
-    for (int i = 0; i < 150; ++i)
-    {
+
+Real gaussianQuantile(Real alpha) {
+    auto upperTail = [](Real z) { return std::erfc(z/std::sqrt(Real(2)))/2; };
+    Real lo = 0, hi = 1;
+    while (upperTail(hi) > alpha) {
+        hi *= 2;
+        if (!std::isfinite(hi) || hi > 256)
+            throw std::runtime_error("alpha is too small for the available floating-point range");
+    }
+    for (int i = 0; i < 200; ++i) {
         Real mid = (lo + hi) / 2;
-        if (std::erfc(mid / std::sqrt(Real(2))) / 2 > alpha)
-            lo = mid;
-        else
-            hi = mid;
+        if (upperTail(mid) > alpha) lo = mid;
+        else hi = mid;
     }
     return (lo + hi) / 2;
 }
-Instance generate(int n, uint64_t seed, Real alpha, Real ratio, Real uncertainty)
-{
-    Instance p;
-    p.n = n;
-    p.z = quantile(alpha);
-    p.w.assign(n, std::vector<Real>(n));
-    p.mu.resize(n);
-    p.variance.resize(n);
-    std::mt19937_64 rng(seed);
-    auto unit = [&]()
-    { return Real(rng() >> 11) / Real(uint64_t(1) << 53); };
-    for (int e = 0; e < n; ++e)
-    {
-        p.mu[e] = 1 + 9 * unit();
-        p.variance[e] = std::pow(uncertainty * p.mu[e], 2);
-    }
-    for (int i = 0; i < n; ++i)
-        for (int j = i + 1; j < n; ++j)
-            if (unit() < 0.3L)
-                p.w[i][j] = p.w[j][i] = 1 + Real(rng() % 10);
-    p.B = ratio * p.score((Mask(1) << n) - 1);
-    // Precomputed exact integer-valued cut oracle. Not counted as algorithm memory.
-    p.value.assign(size_t(1) << n, 0);
-    for (Mask s = 1; s < (Mask(1) << n); ++s)
-    {
-        int e = __builtin_ctzll(s);
-        Mask t = s & (s - 1);
-        Real d = 0;
-        for (int j = 0; j < n; ++j)
-            d += ((t & (Mask(1) << j)) ? -1 : 1) * p.w[e][j];
-        p.value[s] = p.value[t] + d;
-    }
-    return p;
-}
-void improve(Instance &p, Mask candidate, Mask &best, Real &bestValue)
-{
-    Real v = p.f(candidate);
-    if (v > bestValue)
-    {
-        best = candidate;
-        bestValue = v;
-    }
-}
-Mask optimum(Instance &p)
-{
-    Mask best = 0;
-    Real value = 0;
-    for (Mask s = 1; s < (Mask(1) << p.n); ++s)
-        if (p.feasible(s))
-            improve(p, s, best, value);
-    return best;
-}
-Mask greedy(Instance &p)
-{
-    Mask s = 0, best = 0;
-    Real bestValue = 0;
-    for (int e = 0; e < p.n; ++e)
-        if (p.feasible(Mask(1) << e))
-            improve(p, Mask(1) << e, best, bestValue);
-    while (true)
-    {
-        int pick = -1;
-        Real density = 0, base = p.f(s), cost = p.score(s);
-        for (int e = 0; e < p.n; ++e)
-            if (!(s & (Mask(1) << e)))
-            {
-                Mask t = s | (Mask(1) << e);
-                if (!p.feasible(t))
-                    continue;
-                Real d = (p.f(t) - base) / (p.score(t) - cost);
-                if (d > density)
-                {
-                    density = d;
-                    pick = e;
-                }
-            }
-        if (pick < 0)
-            break;
-        s |= Mask(1) << pick;
-    }
-    improve(p, s, best, bestValue);
-    return best;
-}
-struct State
-{
-    Mask s1 = 0, s2 = 0;
-    Real a1 = 0, a2 = 0;
-    bool terminal = false;
+
+struct Graph {
+    int n = 0;
+    size_t arcs = 0;
+    std::vector<std::vector<int>> reverse;
 };
 
-struct Tangent
-{
-    Real theta = 0, capacity = 0, M = 0, D = 0;
-    std::map<int, State> states;
+Graph loadGraph(const std::string& path) {
+    std::ifstream in(path);
+    if (!in) throw std::runtime_error("Cannot open graph: " + path);
+    long long nRaw = 0, mRaw = 0;
+    if (!(in >> nRaw >> mRaw) || nRaw <= 0 || mRaw < 0 ||
+        nRaw > std::numeric_limits<int>::max())
+        throw std::runtime_error("Invalid graph header; expected: number_of_nodes number_of_arcs");
+    Graph g; g.n = static_cast<int>(nRaw); g.arcs = static_cast<size_t>(mRaw);
+    std::vector<std::pair<int,int>> edges;
+    edges.reserve(g.arcs);
+    std::vector<size_t> indegree(static_cast<size_t>(g.n), 0);
+    std::unordered_set<uint64_t> seen;
+    seen.reserve(g.arcs * 2 + 1);
+    for (size_t i = 0; i < g.arcs; ++i) {
+        long long uRaw = -1, vRaw = -1;
+        if (!(in >> uRaw >> vRaw))
+            throw std::runtime_error("Graph ended before all declared arcs were read");
+        if (uRaw < 0 || vRaw < 0 || uRaw >= g.n || vRaw >= g.n || uRaw == vRaw)
+            throw std::runtime_error("Invalid endpoint or self-loop at arc " + std::to_string(i));
+        int u = static_cast<int>(uRaw), v = static_cast<int>(vRaw);
+        uint64_t key = (uint64_t(static_cast<uint32_t>(u)) << 32) |
+                       uint32_t(v);
+        if (!seen.insert(key).second)
+            throw std::runtime_error("Duplicate directed arc: " + std::to_string(u) + " " + std::to_string(v));
+        edges.emplace_back(u, v);
+        ++indegree[static_cast<size_t>(v)];
+    }
+    std::string extra;
+    if (in >> extra) throw std::runtime_error("Extra data after the declared arc count");
+    g.reverse.resize(static_cast<size_t>(g.n));
+    for (int v = 0; v < g.n; ++v) g.reverse[static_cast<size_t>(v)].reserve(indegree[static_cast<size_t>(v)]);
+    for (auto [u,v] : edges) g.reverse[static_cast<size_t>(v)].push_back(u);
+    return g;
+}
+
+struct RRBank {
+    size_t samples = 0, words = 0, memberships = 0, maxSetSize = 0;
+    std::vector<std::vector<uint32_t>> incidence; // vertex -> RR-set IDs
 };
-struct Stats
-{
-    size_t peakStates = 0, peakSlots = 0, tangents = 0;
-};
-Mask focus(Instance &p, const std::vector<int> &order, Real eps, Stats &stats)
-{
-    Real delta = 16 * eps, logBase = std::log1p(delta), top = p.B / p.z;
-    std::map<int, Tangent> tangents;
-    Mask best = 0;
-    Real bestValue = 0;
-    auto update = [&](Mask s)
-    {if(p.feasible(s))improve(p,s,best,bestValue); };
-    for (int e : order)
-    {
-        Mask bit = Mask(1) << e;
-        Real fe = p.f(bit);
-        if (!p.feasible(bit))
-            continue;
-        if (fe > bestValue)
-        {
-            best = bit;
-            bestValue = fe;
+
+RRBank makeRRBank(const Graph& g, size_t samples, Real probability, uint64_t seed) {
+    RRBank bank;
+    bank.samples = samples; bank.words = (samples + 63) / 64;
+    bank.incidence.resize(static_cast<size_t>(g.n));
+    std::mt19937_64 rng(seed);
+    std::uniform_int_distribution<int> target(0, g.n - 1);
+    std::bernoulli_distribution live(static_cast<double>(probability));
+    std::vector<uint32_t> seen(static_cast<size_t>(g.n), 0);
+    std::vector<int> queue; queue.reserve(static_cast<size_t>(g.n));
+    for (size_t r = 0; r < samples; ++r) {
+        uint32_t stamp = static_cast<uint32_t>(r + 1);
+        if (stamp == 0) throw std::runtime_error("Too many RR samples for 32-bit stamps");
+        queue.clear();
+        int root = target(rng); seen[static_cast<size_t>(root)] = stamp; queue.push_back(root);
+        for (size_t head = 0; head < queue.size(); ++head) {
+            int v = queue[head];
+            for (int u : g.reverse[static_cast<size_t>(v)]) {
+                if (seen[static_cast<size_t>(u)] != stamp && live(rng)) {
+                    seen[static_cast<size_t>(u)] = stamp;
+                    queue.push_back(u);
+                }
+            }
         }
-        Real A = p.B - p.mu[e];
-        Real disc = std::max(Real(0), A * A - p.z * p.z * p.variance[e]);
-        // Stable smaller root; avoids cancellation in A-sqrt(disc).
-        Real tminus = p.z * p.variance[e] / (A + std::sqrt(disc));
-        Real tplus = (A + std::sqrt(disc)) / p.z;
-        int first = std::max(0, int(std::floor(std::log(top / std::min(top, tplus)) / std::log(1.5L))) - 2);
-        int last = int(std::ceil(std::log(top / tminus) / std::log(1.5L))) + 2;
-        if (last - first > 100000)
-            throw std::runtime_error("Tangent range too wide");
-        for (int j = first; j <= last; ++j)
-        {
-            Real theta = top * std::pow(1.5L, -j), C = p.B - p.z * theta / 2;
-            Real a = (p.mu[e] + p.z * p.variance[e] / (2 * theta)) / C;
-            if (a > 1)
-                continue;
-            auto &t = tangents[j];
-            t.theta = theta;
-            t.capacity = C;
-            t.M = std::max(t.M, fe);
-            t.D = std::max(t.D, fe / a);
-            if (t.M == 0)
-                continue; // No positive objective guesses exist yet.
-            Real lower = t.M / (1 + delta), upper = 4 * t.D;
-            int kmin = int(std::floor(std::log(lower) / logBase)) - 1;
-            int kmax = int(std::ceil(std::log(upper) / logBase)) + 1;
-            if (kmax - kmin > 100000)
-                throw std::runtime_error("Value range too wide");
-            for (int k = kmin; k <= kmax; ++k)
-            {
-                Real guess = std::exp(k * logBase);
-                if (guess >= lower && guess <= upper)
-                    t.states.try_emplace(k);
+        bank.maxSetSize = std::max(bank.maxSetSize, queue.size());
+        bank.memberships += queue.size();
+        for (int v : queue) bank.incidence[static_cast<size_t>(v)].push_back(static_cast<uint32_t>(r));
+    }
+    return bank;
+}
+
+struct Resources {
+    std::vector<Real> mu, variance;
+    Real sumMu = 0;
+};
+
+Resources makeResources(int n, Real uncertainty, uint64_t seed) {
+    Resources r; r.mu.resize(static_cast<size_t>(n)); r.variance.resize(static_cast<size_t>(n));
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<double> mean(1.0, 10.0);
+    for (int e = 0; e < n; ++e) {
+        Real mu = mean(rng), sigma = uncertainty * mu;
+        if (!std::isfinite(mu) || !std::isfinite(sigma) || sigma <= 0 ||
+            !std::isfinite(sigma*sigma) || sigma*sigma <= 0)
+            throw std::runtime_error("Resource scale produced a zero or non-finite variance");
+        r.mu[static_cast<size_t>(e)] = mu;
+        r.variance[static_cast<size_t>(e)] = sigma * sigma;
+        r.sumMu += mu;
+    }
+    return r;
+}
+
+struct Candidate {
+    std::vector<int> items;
+    std::vector<uint64_t> covered;
+    uint32_t hits = 0;
+    Real mu = 0, variance = 0;
+    explicit Candidate(size_t words = 0) : covered(words, 0) {}
+};
+
+class RROracle {
+public:
+    const RRBank& bank;
+    int nodes;
+    uint64_t queries = 0;
+    RROracle(const RRBank& b, int n) : bank(b), nodes(n) {}
+    Real spread(uint32_t hits) {
+        ++queries;
+        return Real(nodes) * hits / bank.samples;
+    }
+    uint32_t singletonHits(int e) {
+        ++queries;
+        return static_cast<uint32_t>(bank.incidence[static_cast<size_t>(e)].size());
+    }
+    uint32_t marginalHits(const Candidate& set, int e) {
+        ++queries;
+        uint32_t result = 0;
+        for (uint32_t r : bank.incidence[static_cast<size_t>(e)])
+            if (!(set.covered[r >> 6] & (uint64_t(1) << (r & 63)))) ++result;
+        return result;
+    }
+    Real toSpread(uint32_t hits) const { return Real(nodes) * hits / bank.samples; }
+};
+
+void addItem(Candidate& set, int e, uint32_t marginal, const RRBank& bank,
+             const Resources& resources) {
+    for (uint32_t r : bank.incidence[static_cast<size_t>(e)])
+        set.covered[r >> 6] |= uint64_t(1) << (r & 63);
+    set.hits += marginal;
+    set.items.push_back(e);
+    set.mu += resources.mu[static_cast<size_t>(e)];
+    set.variance += resources.variance[static_cast<size_t>(e)];
+}
+
+Real chanceScore(Real mu, Real variance, Real z) { return mu + z * std::sqrt(variance); }
+bool feasible(Real mu, Real variance, Real z, Real budget) {
+    Real score = chanceScore(mu, variance, z);
+    Real tolerance = 64 * std::numeric_limits<Real>::epsilon() * std::max(Real(1), budget);
+    return score <= budget + tolerance;
+}
+
+uint32_t evaluate(const RRBank& bank, const std::vector<int>& items) {
+    std::vector<uint64_t> covered(bank.words, 0);
+    for (int e : items)
+        for (uint32_t r : bank.incidence[static_cast<size_t>(e)])
+            covered[r >> 6] |= uint64_t(1) << (r & 63);
+    uint64_t hits = 0;
+    for (uint64_t word : covered) hits += static_cast<uint64_t>(__builtin_popcountll(word));
+    return static_cast<uint32_t>(hits);
+}
+
+struct RunResult {
+    std::vector<int> items;
+    uint32_t trainHits = 0, evalHits = 0;
+    Real mu = 0, variance = 0;
+    uint64_t queries = 0;
+    double milliseconds = 0;
+    size_t tangents = 0, peakStates = 0, peakSlots = 0;
+};
+
+void consider(RROracle& oracle, const Candidate& set, Candidate& best) {
+    (void)oracle.spread(set.hits);
+    if (set.hits > best.hits) best = set;
+}
+
+RunResult offlineGreedy(const Graph& g, const RRBank& train, const RRBank& evaluation,
+                        const Resources& resources, Real z, Real budget) {
+    RROracle oracle(train, g.n);
+    auto started = Clock::now();
+    Candidate best(train.words), current(train.words);
+    std::vector<char> selected(static_cast<size_t>(g.n), false);
+    for (int e = 0; e < g.n; ++e) {
+        uint32_t hits = oracle.singletonHits(e);
+        Real mu = resources.mu[static_cast<size_t>(e)], var = resources.variance[static_cast<size_t>(e)];
+        if (feasible(mu, var, z, budget) && hits > best.hits) {
+            best = Candidate(train.words); addItem(best, e, hits, train, resources);
+        }
+    }
+    while (true) {
+        int chosen = -1; uint32_t chosenMarginal = 0; Real bestDensity = 0;
+        for (int e = 0; e < g.n; ++e) if (!selected[static_cast<size_t>(e)]) {
+            Real nextMu = current.mu + resources.mu[static_cast<size_t>(e)];
+            Real nextVar = current.variance + resources.variance[static_cast<size_t>(e)];
+            if (!feasible(nextMu, nextVar, z, budget)) continue;
+            uint32_t marginal = oracle.marginalHits(current, e);
+            Real cost = chanceScore(nextMu, nextVar, z) - chanceScore(current.mu, current.variance, z);
+            Real density = oracle.toSpread(marginal) / cost;
+            if (density > bestDensity) { bestDensity = density; chosen = e; chosenMarginal = marginal; }
+        }
+        if (chosen < 0 || chosenMarginal == 0) break;
+        selected[static_cast<size_t>(chosen)] = true;
+        addItem(current, chosen, chosenMarginal, train, resources);
+    }
+    consider(oracle, current, best);
+    auto finished = Clock::now();
+    RunResult result;
+    result.items = best.items; result.trainHits = best.hits;
+    result.evalHits = evaluate(evaluation, result.items);
+    result.mu = best.mu; result.variance = best.variance; result.queries = oracle.queries;
+    result.milliseconds = std::chrono::duration<double,std::milli>(finished-started).count();
+    return result;
+}
+
+struct State {
+    Candidate first, second;
+    Real firstCost = 0, secondCost = 0;
+    explicit State(size_t words = 0) : first(words), second(words) {}
+};
+struct Tangent {
+    Real theta = 0, capacity = 0, maxSingleton = 0, maxDensity = 0;
+    std::map<int,State> active;
+    std::set<int> retired;
+};
+
+std::pair<int,int> checkedIndexRange(Real first, Real last, const char* message) {
+    if (!std::isfinite(first) || !std::isfinite(last) || last < first ||
+        first < Real(std::numeric_limits<int>::min()) ||
+        last >= Real(std::numeric_limits<int>::max()) || last-first > 100000)
+        throw std::runtime_error(message);
+    return {static_cast<int>(first), static_cast<int>(last)};
+}
+
+RunResult focus(const Graph& g, const RRBank& train, const RRBank& evaluation,
+                const Resources& resources, const std::vector<int>& order,
+                Real z, Real budget, Real epsilon) {
+    RROracle oracle(train, g.n);
+    auto started = Clock::now();
+    const Real delta = 16 * epsilon, logValueBase = std::log1p(delta);
+    const Real tangentBase = std::log(1.5L), top = budget / z;
+    std::map<int,Tangent> tangents;
+    Candidate best(train.words);
+    size_t peakStates = 0, peakSlots = 0;
+    for (int e : order) {
+        uint32_t singletonHits = oracle.singletonHits(e);
+        Real singletonValue = oracle.toSpread(singletonHits);
+        Real mu = resources.mu[static_cast<size_t>(e)], var = resources.variance[static_cast<size_t>(e)];
+        if (!feasible(mu, var, z, budget)) continue;
+        if (singletonHits > best.hits) {
+            best = Candidate(train.words); addItem(best, e, singletonHits, train, resources);
+        }
+        Real A = budget - mu;
+        Real discriminant = std::max(Real(0), A*A-z*z*var);
+        Real root = std::sqrt(discriminant);
+        Real tMinus = z*var/(A+root), tPlus = (A+root)/z;
+        if (!(tMinus > 0 && tPlus > 0 && std::isfinite(tMinus) && std::isfinite(tPlus)))
+            throw std::runtime_error("Invalid tangent interval");
+        auto [firstJ,lastJ] = checkedIndexRange(
+            std::max(Real(0), std::floor((std::log(top)-std::log(std::min(top,tPlus)))/tangentBase)-2),
+            std::ceil((std::log(top)-std::log(tMinus))/tangentBase)+2,
+            "Tangent range is too wide");
+        for (int j = firstJ; j <= lastJ; ++j) {
+            Real theta = top * std::pow(1.5L, -j);
+            Real capacity = budget - z*theta/2;
+            Real normalized = (mu + z*var/(2*theta))/capacity;
+            if (!std::isfinite(normalized) || normalized > 1) continue;
+            auto [where,inserted] = tangents.try_emplace(j);
+            Tangent& tangent = where->second;
+            if (inserted) { tangent.theta = theta; tangent.capacity = capacity; }
+            tangent.maxSingleton = std::max(tangent.maxSingleton, singletonValue);
+            tangent.maxDensity = std::max(tangent.maxDensity, singletonValue/normalized);
+            if (tangent.maxSingleton == 0) continue;
+            Real lower = tangent.maxSingleton/(1+delta), upper = 4*tangent.maxDensity;
+            auto [firstK,lastK] = checkedIndexRange(
+                std::floor(std::log(lower)/logValueBase)-1,
+                std::ceil(std::log(upper)/logValueBase)+1,
+                "Value range is too wide; increase epsilon");
+            for (int k = firstK; k <= lastK; ++k) {
+                Real guess = std::exp(k*logValueBase);
+                if (guess >= lower && guess <= upper && !tangent.retired.count(k))
+                    tangent.active.try_emplace(k, train.words);
             }
-            for (auto it = t.states.begin(); it != t.states.end();)
-            {
-                if (std::exp(it->first * logBase) < lower)
-                    it = t.states.erase(it);
-                else
-                    ++it;
+            for (auto it = tangent.active.begin(); it != tangent.active.end();) {
+                Real guess = std::exp(it->first*logValueBase);
+                if (guess < lower) it = tangent.active.erase(it); else ++it;
             }
-            for (auto &[k, s] : t.states)
-            {
-                if (s.terminal)
+            for (auto it = tangent.retired.begin(); it != tangent.retired.end();) {
+                if (std::exp(*it*logValueBase) < lower) it = tangent.retired.erase(it); else ++it;
+            }
+            for (auto it = tangent.active.begin(); it != tangent.active.end();) {
+                int k = it->first; State& state = it->second;
+                Real threshold = std::exp(k*logValueBase)/4;
+                if (normalized >= 0.5L && singletonValue/normalized >= threshold) {
+                    tangent.retired.insert(k);
+                    it = tangent.active.erase(it);
                     continue;
-                Real threshold = std::exp(k * logBase) / 4;
-                if (a >= 0.5L && fe / a >= threshold)
-                {
-                    update(bit);
-                    s.terminal = true;
-                    continue;
                 }
-                // Original feasibility guard protects against floating-point drift.
-                if (s.a1 + a <= 1 && p.feasible(s.s1 | bit) && p.f(s.s1 | bit) - p.f(s.s1) >= threshold * a)
-                {
-                    s.s1 |= bit;
-                    s.a1 += a;
+                bool added = false;
+                if (state.firstCost+normalized <= 1 &&
+                    feasible(state.first.mu+mu, state.first.variance+var, z, budget)) {
+                    uint32_t marginal = oracle.marginalHits(state.first, e);
+                    if (oracle.toSpread(marginal) >= threshold*normalized) {
+                        addItem(state.first, e, marginal, train, resources);
+                        state.firstCost += normalized; added = true;
+                    }
                 }
-                else if (s.a2 + a <= 1 && p.feasible(s.s2 | bit) && p.f(s.s2 | bit) - p.f(s.s2) >= threshold * a)
-                {
-                    s.s2 |= bit;
-                    s.a2 += a;
+                if (!added && state.secondCost+normalized <= 1 &&
+                    feasible(state.second.mu+mu, state.second.variance+var, z, budget)) {
+                    uint32_t marginal = oracle.marginalHits(state.second, e);
+                    if (oracle.toSpread(marginal) >= threshold*normalized) {
+                        addItem(state.second, e, marginal, train, resources);
+                        state.secondCost += normalized;
+                    }
                 }
+                ++it;
             }
         }
         size_t states = 0, slots = 0;
-        for (const auto &[j, t] : tangents)
-            for (const auto &[k, s] : t.states)
-            {
-                ++states;
-                slots += __builtin_popcountll(s.s1) + __builtin_popcountll(s.s2);
+        for (const auto& [j,tangent] : tangents)
+            for (const auto& [k,state] : tangent.active) {
+                (void)j; (void)k; ++states;
+                slots += state.first.items.size()+state.second.items.size();
             }
-        stats.peakStates = std::max(stats.peakStates, states);
-        stats.peakSlots = std::max(stats.peakSlots, slots);
+        peakStates = std::max(peakStates, states); peakSlots = std::max(peakSlots, slots);
     }
-    std::unordered_map<Mask, Mask> usmCache;
-    for (auto &[j, t] : tangents)
-        for (auto &[k, s] : t.states)
-        {
-            if (s.terminal)
-                continue;
-            update(s.s1);
-            update(s.s2);
-            auto it = usmCache.find(s.s1);
-            if (it == usmCache.end())
-            {
-                Mask out = 0;
-                Real value = 0;
-                for (Mask sub = s.s1; sub; sub = (sub - 1) & s.s1)
-                    improve(p, sub, out, value);
-                it = usmCache.emplace(s.s1, out).first;
-            }
-            update(it->second);
+    // RR coverage is monotone, so S1 itself is an optimal unconstrained subset of S1.
+    for (const auto& [j,tangent] : tangents)
+        for (const auto& [k,state] : tangent.active) {
+            (void)j; (void)k; consider(oracle, state.first, best); consider(oracle, state.second, best);
         }
-    stats.tangents = tangents.size();
-    return best;
+    auto finished = Clock::now();
+    RunResult result;
+    result.items = best.items; result.trainHits = best.hits;
+    result.evalHits = evaluate(evaluation, result.items);
+    result.mu = best.mu; result.variance = best.variance; result.queries = oracle.queries;
+    result.milliseconds = std::chrono::duration<double,std::milli>(finished-started).count();
+    result.tangents = tangents.size(); result.peakStates = peakStates; result.peakSlots = peakSlots;
+    return result;
 }
-int main(int argc, char **argv)
-{
-    try
-    {
-        int n = argc > 1 ? std::stoi(argv[1]) : 16;
-        uint64_t seed = argc > 2 ? std::stoull(argv[2]) : 42;
-        Real eps = argc > 3 ? std::stold(argv[3]) : 0.02L;
-        Real alpha = argc > 4 ? std::stold(argv[4]) : 0.05L;
-        Real budget = argc > 5 ? std::stold(argv[5]) : 0.2L;
-        Real uncertainty = argc > 6 ? std::stold(argv[6]) : 0.5L;
-        std::string ordering = argc > 7 ? argv[7] : "random";
-        if (n < 1 || n > 20 || !(eps > 0 && eps < 0.0625L) || !(alpha >= 1e-12L && alpha < 0.5L) || !(budget > 0 && budget <= 1) || !(uncertainty > 0 && uncertainty <= 100))
-            throw std::runtime_error("Require n=1..20, 0<epsilon<1/16, 1e-12<=alpha<0.5, 0<budget_ratio<=1, 0<uncertainty<=100");
-        if (ordering != "random" && ordering != "mu_asc" && ordering != "mu_desc")
-            throw std::runtime_error("Order: random | mu_asc | mu_desc");
-        auto p = generate(n, seed, alpha, budget, uncertainty);
-        std::vector<int> order(n);
-        std::iota(order.begin(), order.end(), 0);
-        std::mt19937_64 rng(seed + 1);
-        if (ordering == "random")
-            std::shuffle(order.begin(), order.end(), rng);
-        else
-            std::stable_sort(order.begin(), order.end(), [&](int a, int b)
-                             { return ordering == "mu_asc" ? p.mu[a] < p.mu[b] : p.mu[a] > p.mu[b]; });
-        std::cout << std::setprecision(12);
-        std::cout << "algorithm,n,seed,epsilon,alpha,budget_ratio,uncertainty,order,B,value,opt_ratio,chance_score,score_over_B,feasible,size,queries,ms,tangents,peak_states,peak_candidate_slots\n";
-        Real optValue = 0;
-        auto run = [&](const std::string &name, auto solve)
-        {
-            p.queries = 0;
-            Stats stats;
-            auto start = std::chrono::steady_clock::now();
-            Mask s = solve(stats);
-            auto finish = std::chrono::steady_clock::now();
-            Real value = p.value[s];
-            if (name == "OPT")
-                optValue = value;
-            std::cout << name << ',' << n << ',' << seed << ',' << eps << ',' << alpha << ',' << budget << ',' << uncertainty << ',' << ordering << ',' << p.B << ',' << value << ',';
-            if (optValue > 0)
-                std::cout << value / optValue;
-            else
-                std::cout << "NA";
-            std::cout << ',' << p.score(s) << ',' << p.score(s) / p.B << ',' << p.feasible(s) << ',' << __builtin_popcountll(s) << ',' << p.queries << ','
-                      << std::chrono::duration<double, std::milli>(finish - start).count() << ',' << stats.tangents << ',' << stats.peakStates << ',' << stats.peakSlots << '\n';
-            if (!p.feasible(s))
-                throw std::runtime_error("Infeasible output");
-            if (name == "FOCUS_EXACT_USM" && value + 1e-10L < (0.0625L - eps) * optValue)
-                throw std::runtime_error("Approximation check failed");
-            std::cerr << name << " selected:";
-            for (int e = 0; e < n; ++e)
-                if (s & (Mask(1) << e))
-                    std::cerr << ' ' << e;
-            std::cerr << '\n';
-        };
-        run("OPT", [&](Stats &)
-            { return optimum(p); });
-        run("Offline_Greedy_CC", [&](Stats &)
-            { return greedy(p); });
-        run("FOCUS_EXACT_USM", [&](Stats &s)
-            { return focus(p, order, eps, s); });
+
+Config parseArguments(int argc, char** argv) {
+    Config c;
+    auto take = [&](int& i) -> std::string {
+        if (++i >= argc) throw std::runtime_error("Missing value after option");
+        return argv[i];
+    };
+    bool absoluteBudget = false, ratioBudget = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--graph") c.graph = take(i);
+        else if (a == "--order") c.order = take(i);
+        else if (a == "--rr-samples") c.rrSamples = std::stoull(take(i));
+        else if (a == "--eval-samples") c.evalSamples = std::stoull(take(i));
+        else if (a == "--p") c.edgeProbability = std::stold(take(i));
+        else if (a == "--epsilon") c.epsilon = std::stold(take(i));
+        else if (a == "--alpha") c.alpha = std::stold(take(i));
+        else if (a == "--budget") { c.budget = std::stold(take(i)); absoluteBudget = true; }
+        else if (a == "--budget-ratio") { c.budgetRatio = std::stold(take(i)); ratioBudget = true; }
+        else if (a == "--uncertainty") c.uncertainty = std::stold(take(i));
+        else if (a == "--resource-seed") c.resourceSeed = std::stoull(take(i));
+        else if (a == "--rr-seed") c.rrSeed = std::stoull(take(i));
+        else if (a == "--eval-seed") c.evalSeed = std::stoull(take(i));
+        else if (a == "--order-seed") c.orderSeed = std::stoull(take(i));
+        else if (a == "--help") {
+            std::cout << "Usage: facebook_experiment [--graph facebook] [--budget 100] [--alpha .05]\n"
+                      << "  [--epsilon .02] [--uncertainty .5] [--p .01]\n"
+                      << "  [--rr-samples 50000] [--eval-samples 100000]\n"
+                      << "  [--order random|mu_asc|mu_desc] [--resource-seed N]\n";
+            std::exit(0);
+        } else throw std::runtime_error("Unknown option: " + a);
     }
-    catch (const std::exception &e)
-    {
+    if (absoluteBudget && ratioBudget) throw std::runtime_error("Choose --budget or --budget-ratio, not both");
+    if (!(c.rrSamples > 0 && c.evalSamples > 0 && c.edgeProbability > 0 && c.edgeProbability <= 1 &&
+          c.epsilon > 0 && c.epsilon < 0.0625L && c.alpha > 0 && c.alpha < 0.5L &&
+          c.uncertainty > 0 && c.budget > 0))
+        throw std::runtime_error("Invalid numeric parameter");
+    if (c.rrSamples > std::numeric_limits<uint32_t>::max() ||
+        c.evalSamples > std::numeric_limits<uint32_t>::max())
+        throw std::runtime_error("RR sample count exceeds the 32-bit representation");
+    if (ratioBudget && !(c.budgetRatio > 0 && c.budgetRatio <= 1))
+        throw std::runtime_error("budget-ratio must be in (0,1]");
+    if (c.order != "random" && c.order != "mu_asc" && c.order != "mu_desc")
+        throw std::runtime_error("order must be random, mu_asc, or mu_desc");
+    return c;
+}
+
+void printResult(const std::string& name, const RunResult& r, const Config& c,
+                 const Graph& g, const RRBank& train, const RRBank& evaluation,
+                 Real z, Real budget, double rrMilliseconds) {
+    Real trainSpread = Real(g.n)*r.trainHits/train.samples;
+    Real evalSpread = Real(g.n)*r.evalHits/evaluation.samples;
+    Real evalRate = Real(r.evalHits)/evaluation.samples;
+    Real evalStandardError = Real(g.n)*std::sqrt(evalRate*(1-evalRate)/evaluation.samples);
+    Real evalLow = std::max(Real(0), evalSpread-Real(1.96)*evalStandardError);
+    Real evalHigh = std::min(Real(g.n), evalSpread+Real(1.96)*evalStandardError);
+    Real score = chanceScore(r.mu, r.variance, z);
+    std::cout << name << ',' << g.n << ',' << g.arcs << ',' << c.rrSamples << ',' << c.evalSamples << ','
+              << c.edgeProbability << ',' << c.epsilon << ',' << c.alpha << ',' << budget << ','
+              << c.uncertainty << ',' << c.order << ',' << c.resourceSeed << ',' << c.rrSeed << ','
+              << c.evalSeed << ',' << c.orderSeed << ',' << trainSpread << ',' << evalSpread << ','
+              << evalStandardError << ',' << evalLow << ',' << evalHigh << ','
+              << score << ',' << score/budget << ',' << feasible(r.mu,r.variance,z,budget) << ','
+              << r.items.size() << ',' << r.queries << ',' << r.milliseconds << ','
+              << rrMilliseconds << ',' << r.milliseconds+rrMilliseconds << ','
+              << r.tangents << ',' << r.peakStates << ',' << r.peakSlots << '\n';
+    std::cerr << name << " seeds:";
+    for (int e : r.items) std::cerr << ' ' << e;
+    std::cerr << '\n';
+}
+
+int main(int argc, char** argv) {
+    try {
+        Config c = parseArguments(argc, argv);
+        Graph graph = loadGraph(c.graph);
+        Resources resources = makeResources(graph.n, c.uncertainty, c.resourceSeed);
+        if (c.budgetRatio > 0) c.budget = c.budgetRatio*resources.sumMu;
+        Real z = gaussianQuantile(c.alpha);
+        auto rrStart = Clock::now();
+        RRBank train = makeRRBank(graph, c.rrSamples, c.edgeProbability, c.rrSeed);
+        RRBank evaluation = makeRRBank(graph, c.evalSamples, c.edgeProbability, c.evalSeed);
+        auto rrEnd = Clock::now();
+        double rrMilliseconds = std::chrono::duration<double,std::milli>(rrEnd-rrStart).count();
+        std::cerr << "Loaded " << graph.n << " nodes, " << graph.arcs << " directed arcs. "
+                  << "RR generation ms=" << rrMilliseconds
+                  << ", train mean/max size=" << Real(train.memberships)/train.samples << '/' << train.maxSetSize
+                  << ", eval mean/max size=" << Real(evaluation.memberships)/evaluation.samples << '/' << evaluation.maxSetSize << '\n';
+        std::vector<int> order(static_cast<size_t>(graph.n));
+        std::iota(order.begin(), order.end(), 0);
+        if (c.order == "random") {
+            std::mt19937_64 rng(c.orderSeed); std::shuffle(order.begin(), order.end(), rng);
+        } else std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            return c.order == "mu_asc" ? resources.mu[static_cast<size_t>(a)] < resources.mu[static_cast<size_t>(b)]
+                                       : resources.mu[static_cast<size_t>(a)] > resources.mu[static_cast<size_t>(b)];
+        });
+        RunResult greedy = offlineGreedy(graph, train, evaluation, resources, z, c.budget);
+        RunResult streamed = focus(graph, train, evaluation, resources, order, z, c.budget, c.epsilon);
+        std::cout << std::setprecision(12)
+                  << "algorithm,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,B,uncertainty,order,resource_seed,rr_seed,eval_seed,order_seed,train_spread,eval_spread,eval_se,eval_ci95_low,eval_ci95_high,chance_score,score_over_B,feasible,size,queries,algorithm_ms,rr_generation_ms,total_ms,tangents,peak_active_states,peak_candidate_slots\n";
+        printResult("Offline_Greedy_CC",greedy,c,graph,train,evaluation,z,c.budget,rrMilliseconds);
+        printResult("FOCUS_RR",streamed,c,graph,train,evaluation,z,c.budget,rrMilliseconds);
+    } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << '\n';
         return 1;
     }
