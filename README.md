@@ -31,11 +31,13 @@ make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 
 `make run` chạy năm ngân sách bằng 1%, 2%, 3%, 4% và 5% tổng chi phí trung bình không nhiễu `sum(mu)`, rồi ghi ba tệp văn bản dạng TSV. Cả ba tệp có một dòng tiêu đề và đúng một dòng dữ liệu cho mỗi giá trị `B`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
 
-- `results/facebook_results.txt` giữ định dạng hiện tại: `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`.
-- `results/facebook_offline_metrics.txt` chỉ chứa kết quả của `Offline_Greedy_CC`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
-- `results/facebook_focus_metrics.txt` chỉ chứa kết quả của `FOCUS_RR`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
+- `results/facebook_results_YYYY-MM-DD.txt` giữ định dạng hiện tại: `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`.
+- `results/facebook_offline_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `Offline_Greedy_CC`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
+- `results/facebook_focus_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `FOCUS_RR`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
 
 Cột `%B` hiển thị tỷ lệ ngân sách dưới dạng phần trăm, chẳng hạn `1%`; cột `B` bên cạnh là giá trị ngân sách thực bằng tỷ lệ đó nhân với `sum_mu`.
+
+`YYYY-MM-DD` là ngày chạy lấy từ máy. Các file dùng chế độ ghi thêm: chạy lại trong cùng ngày sẽ nối các dòng mới vào cuối file, còn header chỉ được ghi một lần. Có thể đặt ngày thủ công, ví dụ `make run RUN_DATE=2026-09-18`.
 
 Các cột được phân tách bằng tab nên có thể mở trực tiếp bằng trình soạn thảo văn bản hoặc nhập vào Excel.
 

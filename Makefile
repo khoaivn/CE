@@ -11,9 +11,12 @@ RR_SAMPLES ?= 50000
 EVAL_SAMPLES ?= 100000
 RESULT_DIR ?= results
 BUDGET_RATIOS ?= 0.01 0.02 0.03 0.04 0.05
-TEXT_RESULT ?= $(RESULT_DIR)/facebook_results.txt
-OFFLINE_RESULT ?= $(RESULT_DIR)/facebook_offline_metrics.txt
-FOCUS_RESULT ?= $(RESULT_DIR)/facebook_focus_metrics.txt
+ifndef RUN_DATE
+RUN_DATE := $(shell date +%Y-%m-%d)
+endif
+TEXT_RESULT ?= $(RESULT_DIR)/facebook_results_$(RUN_DATE).txt
+OFFLINE_RESULT ?= $(RESULT_DIR)/facebook_offline_metrics_$(RUN_DATE).txt
+FOCUS_RESULT ?= $(RESULT_DIR)/facebook_focus_metrics_$(RUN_DATE).txt
 EXECUTABLE = $(if $(filter /%,$(TARGET)),$(TARGET),./$(TARGET))
 
 # GNU g++ accepts -fopenmp. Apple clang does not unless libomp is installed.
@@ -43,9 +46,15 @@ $(RESULT_DIR):
 	mkdir -p $@
 
 run: $(TARGET) | $(RESULT_DIR)
-	@printf 'budget_ratio\tB\tsum_mu\toffline_f_value\toffline_eval_f_value\toffline_queries\toffline_memory_mb_est\toffline_running_time_ms\tfocus_f_value\tfocus_eval_f_value\tfocus_queries\tfocus_memory_mb_est\tfocus_running_time_ms\n' > "$(TEXT_RESULT)"
-	@printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' > "$(OFFLINE_RESULT)"
-	@printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' > "$(FOCUS_RESULT)"
+	@if [ ! -s "$(TEXT_RESULT)" ]; then \
+		printf 'budget_ratio\tB\tsum_mu\toffline_f_value\toffline_eval_f_value\toffline_queries\toffline_memory_mb_est\toffline_running_time_ms\tfocus_f_value\tfocus_eval_f_value\tfocus_queries\tfocus_memory_mb_est\tfocus_running_time_ms\n' >> "$(TEXT_RESULT)"; \
+	fi
+	@if [ ! -s "$(OFFLINE_RESULT)" ]; then \
+		printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' >> "$(OFFLINE_RESULT)"; \
+	fi
+	@if [ ! -s "$(FOCUS_RESULT)" ]; then \
+		printf '%%B\tB\tf_value\tqueries\tmemory_mb_est\trunning_time_ms\n' >> "$(FOCUS_RESULT)"; \
+	fi
 	@set -e; \
 	for ratio in $(BUDGET_RATIOS); do \
 		output="$$($(EXECUTABLE) $(COMMON_ARGS) --budget-ratio "$$ratio")"; \
@@ -70,10 +79,11 @@ run: $(TARGET) | $(RESULT_DIR)
 run-one: $(TARGET) | $(RESULT_DIR)
 	@test -n "$(BUDGET_RATIO)" || { echo "BUDGET_RATIO is required" >&2; exit 2; }
 	@$(MAKE) --no-print-directory run \
+		RUN_DATE="$(RUN_DATE)" \
 		BUDGET_RATIOS="$(BUDGET_RATIO)" \
-		TEXT_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA).txt" \
-		OFFLINE_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_offline_metrics.txt" \
-		FOCUS_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_focus_metrics.txt"
+		TEXT_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_$(RUN_DATE).txt" \
+		OFFLINE_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_offline_metrics_$(RUN_DATE).txt" \
+		FOCUS_RESULT="$(RESULT_DIR)/facebook_ratio$(BUDGET_RATIO)_alpha$(ALPHA)_focus_metrics_$(RUN_DATE).txt"
 
 clean:
 	rm -f $(TARGET)
