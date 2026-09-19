@@ -21,9 +21,9 @@ using Clock = std::chrono::steady_clock;
 struct Config
 {
     std::string graph = "facebook";
-    std::string order = "random";
+    std::string order = "mu_asc";
     size_t rrSamples = 50000, evalSamples = 100000;
-    Real edgeProbability = 0.01L, epsilon = 0.02L, alpha = 0.05L;
+    Real edgeProbability = 0.01L, epsilon = 0.053L, alpha = 0.05L;
     Real budget = 100.0L, budgetRatio = -1.0L;
     uint64_t rrSeed = 43, evalSeed = 44, orderSeed = 45;
     bool printSeeds = false;
@@ -707,7 +707,7 @@ Config parseArguments(int argc, char **argv)
         else if (a == "--help")
         {
             std::cout << "Usage: facebook_experiment [--graph facebook] [--budget 100] [--alpha .05]\n"
-                      << "  [--epsilon .02] [--p .01]\n"
+                      << "  [--epsilon .053] [--p .01]\n"
                       << "  [--rr-samples 50000] [--eval-samples 100000]\n"
                       << "  [--order random|mu_asc|mu_desc] [--print-seeds]\n";
             std::exit(0);
@@ -757,7 +757,8 @@ void printResult(const std::string &name, const RunResult &r, const Config &c,
               << c.epsilon << ',' << c.alpha << ',' << c.order << ','
               << c.rrSeed << ',' << c.evalSeed << ',' << c.orderSeed << ','
               << rrMilliseconds << ','
-              << r.tangents << ',' << r.activeStates << ',' << r.candidateSlots << '\n';
+              << r.tangents << ',' << r.activeStates << ',' << r.candidateSlots << ','
+              << std::max(Real(0), score - budget) << '\n';
     if (c.printSeeds)
     {
         std::cerr << name << " seeds:";
@@ -804,7 +805,7 @@ int main(int argc, char **argv)
         size_t sharedMemoryBytes = graphStorageBytes(graph) + resourcesStorageBytes(resources) +
                                    rrStorageBytes(train) + rrStorageBytes(evaluation) + order.capacity() * sizeof(int);
         std::cout << std::setprecision(12)
-                  << "algorithm,budget_ratio,B,sum_mu,f_value,eval_f_value,queries,memory_mb_est,running_time_ms,algorithm_memory_mb_est,shared_memory_mb_est,total_time_ms,feasible,chance_score,score_over_B,size,eval_f_se,eval_f_ci95_low,eval_f_ci95_high,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,order,rr_seed,eval_seed,order_seed,rr_generation_ms,tangents,retained_active_states,retained_candidate_slots\n";
+                  << "algorithm,budget_ratio,B,sum_mu,f_value,eval_f_value,queries,memory_mb_est,running_time_ms,algorithm_memory_mb_est,shared_memory_mb_est,total_time_ms,feasible,chance_score,score_over_B,size,eval_f_se,eval_f_ci95_low,eval_f_ci95_high,n,arcs,rr_samples,eval_samples,ic_probability,epsilon,alpha,order,rr_seed,eval_seed,order_seed,rr_generation_ms,tangents,retained_active_states,retained_candidate_slots,violation\n";
         printResult("Offline_Greedy_CC", greedy, c, graph, train, evaluation, z, c.budget,
                     resources.sumMu, rrMilliseconds, sharedMemoryBytes);
         printResult("FOCUS_RR", streamed, c, graph, train, evaluation, z, c.budget,

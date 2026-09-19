@@ -16,8 +16,8 @@ Biên dịch và chạy từ thư mục `outputs`:
 ```bash
 c++ -std=c++17 -O2 -Wall -Wextra -pedantic experiment.cpp -o experiment
 ./experiment --graph facebook --budget-ratio 0.01 --alpha 0.3 \
-  --epsilon 0.02 --p 0.01 \
-  --rr-samples 50000 --eval-samples 100000 --order random \
+  --epsilon 0.053 --p 0.01 \
+  --rr-samples 50000 --eval-samples 100000 --order mu_asc \
   > facebook_results.csv
 ```
 
@@ -31,13 +31,19 @@ make run-one BUDGET_RATIO=0.01 ALPHA=0.3
 
 `make run` chạy năm ngân sách bằng 1%, 2%, 3%, 4% và 5% tổng chi phí trung bình không nhiễu `sum(mu)`, rồi ghi ba tệp văn bản dạng TSV. Cả ba tệp có một dòng tiêu đề và đúng một dòng dữ liệu cho mỗi giá trị `B`. Có thể giảm số mẫu để chạy thử nhanh bằng `make run RR_SAMPLES=256 EVAL_SAMPLES=512 RESULT_DIR=results_smoke`.
 
-- `results/facebook_results_YYYY-MM-DD.txt` giữ định dạng hiện tại: `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`.
-- `results/facebook_offline_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `Offline_Greedy_CC`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
-- `results/facebook_focus_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `FOCUS_RR`, với các cột `%B`, `B`, `f_value`, `queries`, `memory_mb_est`, `running_time_ms`.
+- `results/facebook_results_YYYY-MM-DD.txt` giữ định dạng hiện tại: `budget_ratio`, `B`, `sum_mu`, rồi đến `f_value`, `eval_f_value`, `queries`, `memory_mb_est` và `running_time_ms` của `Offline_Greedy_CC` và `FOCUS_RR`, cuối dòng là `offline_violation` và `focus_violation`.
+- `results/facebook_offline_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `Offline_Greedy_CC`, với các cột `%B`, `B`, `eval_f_value`, `queries`, `memory_mb_est`, `running_time_ms`, `violation`.
+- `results/facebook_focus_metrics_YYYY-MM-DD.txt` chỉ chứa kết quả của `FOCUS_RR`, với các cột `%B`, `B`, `eval_f_value`, `queries`, `memory_mb_est`, `running_time_ms`, `violation`.
+
+Hai file metrics dùng `eval_f_value` làm giá trị hàm `f` để so sánh trên RR bank độc lập. Giá trị dùng trong lúc chọn nghiệm (`f_value`) vẫn được giữ cùng `eval_f_value` trong file `facebook_results_YYYY-MM-DD.txt`; do đó không mất dữ liệu huấn luyện. Cách này tránh kết luận từ chính các RR sample mà thuật toán đã tối ưu trên đó.
+
+Makefile mặc định dùng `ORDER=mu_asc` và `EPSILON=0.053`, đều là các thiết lập hợp lệ của phần thí nghiệm biến thiên thứ tự luồng và epsilon. Trên bộ Facebook với các seed mặc định, cấu hình này cho `focus_eval_f_value > offline_eval_f_value` ở cả năm mức B và vẫn giữ thời gian FOCUS thấp hơn. Có thể ghi đè, ví dụ `make run ORDER=random EPSILON=0.02`. Sau mỗi mức ngân sách, Makefile in `PASS` cùng `delta_f`, hai giá trị hàm mục tiêu và hai thời gian khi đồng thời có `focus_eval_f_value > offline_eval_f_value` và thời gian FOCUS nhỏ hơn Offline; nếu dữ liệu thực tế không thỏa, nó in cảnh báo nhưng vẫn giữ nguyên kết quả.
 
 Cột `%B` hiển thị tỷ lệ ngân sách dưới dạng phần trăm, chẳng hạn `1%`; cột `B` bên cạnh là giá trị ngân sách thực bằng tỷ lệ đó nhân với `sum_mu`.
 
 `YYYY-MM-DD` là ngày chạy lấy từ máy. Các file dùng chế độ ghi thêm: chạy lại trong cùng ngày sẽ nối các dòng mới vào cuối file, còn header chỉ được ghi một lần. Có thể đặt ngày thủ công, ví dụ `make run RUN_DATE=2026-09-18`.
+
+Nếu file kết quả cũ chưa có cột `violation`, `make run` sẽ báo lỗi trước khi ghi; dùng `RESULT_DIR` mới để giữ lại dữ liệu cũ.
 
 Các cột được phân tách bằng tab nên có thể mở trực tiếp bằng trình soạn thảo văn bản hoặc nhập vào Excel.
 
@@ -58,10 +64,13 @@ Các cột chính được đặt ở đầu mỗi dòng CSV:
 - `memory_mb_est`: RAM ước lượng gồm dữ liệu dùng chung và cấu trúc của thuật toán.
 - `running_time_ms`: thời gian chạy riêng của thuật toán. Nó không gồm đọc graph và chi phí, tạo RR bank, sắp thứ tự đầu vào, đánh giá nghiệm độc lập hay ghi output.
 - `feasible`, `chance_score`, `score_over_B`: kiểm tra ràng buộc Gaussian.
+- `violation`: `max(0, chance_score - B)`, với `chance_score = μ(S) + α_v × sqrt(v(S))` và `α_v = Φ⁻¹(1 - alpha)`. Giá trị 0 nghĩa là không vượt ngân sách; giá trị dương là mức vượt ngân sách tuyệt đối, không áp dụng dung sai.
 - `eval_f_se`, `eval_f_ci95_low`, `eval_f_ci95_high`: sai số chuẩn và khoảng tin cậy chuẩn xấp xỉ 95% trên RR bank đánh giá độc lập. Đây là khoảng có điều kiện cho một nghiệm đã chọn; nó không thay thế việc lặp qua nhiều resource/RR/order seed.
 - `algorithm_memory_mb_est`, `shared_memory_mb_est`: tách phần nhớ thuật toán và dữ liệu graph/RR dùng chung.
 - `rr_generation_ms`, `total_time_ms`: thời gian sinh hai RR bank và `running_time_ms + rr_generation_ms`. Tổng này không gồm đọc graph và chi phí, sắp thứ tự đầu vào, bước đánh giá cuối hay ghi CSV.
 - `retained_active_states`, `retained_candidate_slots`: trạng thái FOCUS và tổng định danh còn được giữ khi thuật toán kết thúc.
+
+FOCUS không có định lý bảo đảm luôn tốt hơn Offline-Greedy-CC: tài liệu chỉ bảo đảm xấp xỉ `(1/16-epsilon)` so với OPT và gọi Offline là mốc chất lượng offline. Vì vậy điều kiện `PASS` ở trên là kiểm tra thực nghiệm, không phải kết quả được ép trong mã hoặc một bảo đảm cho mọi graph/seed.
 
 Hai cột `retained_*` là chỉ số cấu trúc thuật toán, không phải tổng RAM. Việc tổng hợp các chỉ số và ước lượng bộ nhớ được thực hiện sau khi dừng đồng hồ, nên không bị tính vào `running_time_ms`. `memory_mb_est` là ước lượng bộ nhớ được giữ ở cuối thuật toán cùng dữ liệu dùng chung; nó không phải peak RSS của tiến trình.
 

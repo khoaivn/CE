@@ -47,12 +47,12 @@ def parse_data(filename):
                 )
 
             parts = line.split("\t")
-            if len(parts) != 6:
+            if len(parts) not in (6, 7):
                 parts = line.split()
-            if len(parts) != 6:
+            if len(parts) not in (6, 7):
                 raise ValueError(
-                    f"Dòng {line_number}: cần 6 cột %B, B, f_value, queries, "
-                    "memory_mb_est, running_time_ms"
+                    f"Dòng {line_number}: cần 6 hoặc 7 cột %B, B, eval_f_value, queries, "
+                    "memory_mb_est, running_time_ms[, violation]"
                 )
 
             try:
@@ -232,10 +232,10 @@ def main():
 
     output_prefix = data_file.with_suffix("")
     chart_specs = (
-        ("f_value", "Giá trị hàm f", "So sánh giá trị hàm f"),
-        ("queries", "Số queries", "So sánh số queries"),
-        ("memory_mb_est", "Memory ước lượng (MiB)", "So sánh memory"),
-        ("running_time_ms", "Running time (ms)", "So sánh running time"),
+        ("f_value", "Objective Value f", "Objective Value"),
+        ("queries", "Number of Oracle Queries", "Oracle Query Count"),
+        ("memory_mb_est", "Estimated Memory Usage (MiB)", "Estimated Memory Usage"),
+        ("running_time_ms", "Running Time (ms)", "Running Time"),
     )
 
     for field, label, title in chart_specs:
